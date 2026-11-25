@@ -1,6 +1,6 @@
 {
   "name": "Pwnterrey Badge",
-  "version": "2.1.6",
+  "version": "2.1.7",
   "builds": [
     {
       "chipFamily": "ESP32-C5",
