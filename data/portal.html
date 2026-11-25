@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#0d0d0b">
+<title>PWNTERREY</title>
+<style>
+:root{
+--bg:#0d0d0b;--bg2:#151514;--bg3:#1e1e1c;--bg-h:#2a2a28;
+--fg:#f2efe8;--fg2:#9a9a9a;--fg3:#666;
+--bd:rgba(255,255,255,.08);--bd2:rgba(255,255,255,.1);--bd3:rgba(255,255,255,.2);
+--ok:#34d399;--warn:#fbbf24;--crit:#f43f5e;--info:#60a5fa;--accent:#a78bfa;
+--r:10px;--r2:14px;
+--mono:'SF Mono',Monaco,'Cascadia Code','Courier New',monospace;
+--sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overflow-x:hidden}
+body{background:var(--bg);color:var(--fg);font:400 15px/1.5 var(--sans)}
+main{padding:12px 16px 90px;max-width:520px;margin:0 auto}
+.pg{display:none}.pg.on{display:block;animation:fi .2s ease}
+@keyframes fi{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.ph{font-size:20px;font-weight:700;letter-spacing:-.02em;margin:8px 0 14px}
+.ct{font-size:10px;font-weight:700;color:var(--fg3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}
+.c{background:var(--bg2);border:1px solid var(--bd);border-radius:var(--r2);padding:16px;margin-bottom:12px;box-shadow:inset 0 1px 0 rgba(255,255,255,.02)}
+.b{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:44px;padding:0 18px;border:none;border-radius:var(--r);font:600 14px var(--sans);cursor:pointer;transition:all .12s;color:var(--fg);background:var(--bg3);-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+.b:active{transform:translateY(1px);opacity:.85}
+.b:disabled{opacity:.35;cursor:not-allowed;transform:none;pointer-events:none}
+.bp{background:var(--accent);color:#0d0d0b}.bd{background:rgba(244,63,94,.1);color:var(--crit);border:1px solid rgba(244,63,94,.2)}
+.bo{background:var(--bg3);border:1px solid var(--bd2);color:var(--fg)}
+.bs{min-height:36px;padding:0 12px;font-size:12px}
+.inp{width:100%;min-height:44px;padding:0 14px;background:var(--bg);border:1px solid var(--bd2);border-radius:var(--r);color:var(--fg);font:400 14px var(--sans);outline:none;transition:border .15s}
+.inp:focus{border-color:var(--accent)}
+select.inp{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px}
+textarea.inp{min-height:72px;padding:10px 14px;resize:vertical;font-family:var(--mono);font-size:13px}
+.fr{display:flex;align-items:center;gap:8px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.pill{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:11px;font-weight:700}
+.wdGpsPill{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-size:11px;font-weight:700;transition:all .3s}
+.wdGpsFix{background:rgba(52,211,153,.08);color:var(--ok);border:1px solid rgba(52,211,153,.2)}
+.wdGpsNoFix{background:rgba(244,63,94,.04);color:var(--crit);border:1px solid rgba(244,63,94,.2)}
+.p-ok{background:rgba(52,211,153,.08);color:var(--ok);border:1px solid rgba(52,211,153,.2)}
+.p-scan{background:rgba(96,165,250,.08);color:var(--info);border:1px solid rgba(96,165,250,.2)}
+.p-atk{background:rgba(244,63,94,.08);color:var(--crit);border:1px solid rgba(244,63,94,.2)}
+.p-cap{background:rgba(251,191,36,.08);color:var(--warn);border:1px solid rgba(251,191,36,.2)}
+.p-warn{background:rgba(251,191,36,.08);color:var(--warn);border:1px solid rgba(251,191,36,.2)}
+.p-crit{background:rgba(244,63,94,.08);color:var(--crit);border:1px solid rgba(244,63,94,.2)}
+.p-info{background:rgba(96,165,250,.08);color:var(--info);border:1px solid rgba(96,165,250,.2)}
+.dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.d-ok{background:var(--ok);box-shadow:0 0 6px var(--ok)}.d-w{background:var(--warn);box-shadow:0 0 6px var(--warn)}.d-c{background:var(--crit);box-shadow:0 0 6px var(--crit)}
+.d-g{background:var(--ok);box-shadow:0 0 6px var(--ok)}.d-a{background:var(--warn);box-shadow:0 0 6px var(--warn)}.d-r{background:var(--crit);box-shadow:0 0 6px var(--crit)}
+.kv{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--bd);font-size:13px}
+.kv:last-child{border-bottom:none}
+.kl{color:var(--fg2)}.kvv{font-weight:600;font-family:var(--mono);font-size:13px}
+.bar{height:4px;background:var(--bg);border-radius:2px;overflow:hidden;margin-top:4px}
+.bar-f{height:100%;border-radius:2px;background:var(--accent);transition:width .3s}
+.ck{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--fg2);cursor:pointer;white-space:nowrap}
+.ck input{width:18px;height:18px;accent-color:var(--accent)}
+#al{max-height:400px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--bg3) transparent}
+#al::-webkit-scrollbar{width:4px}#al::-webkit-scrollbar-thumb{background:var(--bg3);border-radius:4px}
+.ap{padding:10px 14px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px;cursor:pointer;transition:background .1s}
+.ap:active,.ap.sel{background:rgba(167,139,250,.06)}
+.ap.sel{border-left:3px solid var(--accent)}
+.ap-info{flex:1;min-width:0}
+.ap-name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ap-meta{font-size:11px;color:var(--fg2);font-family:var(--mono)}
+.ap-sig{font-size:12px;font-weight:700;font-family:var(--mono);flex-shrink:0}
+.ag{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.ac{padding:12px;border-radius:var(--r);border:1px solid var(--bd);background:var(--bg2);cursor:pointer;text-align:center;transition:all .12s}
+.ac:active{background:var(--bg3);border-color:var(--accent)}
+.ac-n{font-size:13px;font-weight:600;margin-top:4px}
+.ac-d{font-size:11px;color:var(--fg3)}
+.ac svg{width:20px;height:20px;color:var(--accent)}
+.aab{display:none;background:rgba(244,63,94,.06);border:1px solid rgba(244,63,94,.2);border-radius:var(--r);padding:12px 16px;margin-bottom:12px;animation:pl 2s infinite}
+@keyframes pl{0%,100%{opacity:.85}50%{opacity:1}}
+.sf{max-height:240px;overflow-y:auto;background:var(--bg);border:1px solid var(--bd);border-radius:var(--r);padding:8px 10px;font:12px/1.6 var(--mono);color:var(--ok);scrollbar-width:thin;white-space:pre-wrap;word-break:break-all}
+.m-state{border:1px solid var(--ok);border-radius:var(--r2);padding:16px;background:rgba(52,211,153,.03);margin-bottom:12px;transition:all .3s}
+.m-state.warn{border-color:var(--warn);background:rgba(251,191,36,.03)}
+.m-state.danger{border-color:var(--crit);background:rgba(244,63,94,.04);animation:pl 2.8s infinite}
+.m-eye{display:flex;align-items:center;gap:8px;font-size:10px;font-weight:800;letter-spacing:.1em;text-transform:uppercase}
+.m-led{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.m-title{font-size:clamp(20px,5vw,28px);font-weight:800;letter-spacing:-.02em;line-height:1.2;margin:12px 0 8px}
+.mt{width:100%;border-collapse:collapse;text-align:left;font-size:11px;font-family:var(--mono)}
+.mt th{padding:8px 10px;font-weight:700;color:var(--fg2);border-bottom:1px solid var(--bd2);position:sticky;top:0;background:var(--bg2)}
+.mt td{padding:6px 10px;border-bottom:1px solid var(--bd);white-space:nowrap}
+.mt-wrap{max-height:300px;overflow:auto;border:1px solid var(--bd);border-radius:var(--r);scrollbar-width:thin}
+.mp{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.mb{padding:6px 14px;border-radius:20px;font:700 12px var(--sans);border:1px solid var(--bd2);background:transparent;color:var(--fg2);cursor:pointer;transition:all .12s}
+.mb.on{background:rgba(167,139,250,.1);border-color:var(--accent);color:var(--accent)}
+.pills{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+.pills .p{padding:5px 12px;border-radius:20px;font:600 12px var(--sans);border:1px solid var(--bd2);background:transparent;color:var(--fg2);cursor:pointer;transition:all .12s}
+.pills .p.on{background:rgba(167,139,250,.1);border-color:var(--accent);color:var(--accent)}
+.tpg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.tpc{padding:10px;border:1px solid var(--bd);border-radius:var(--r);cursor:pointer;transition:all .12s}
+.tpc.on{border-color:var(--accent);background:rgba(167,139,250,.06)}
+.tpn{font-size:13px;font-weight:600}.tpd{font-size:11px;color:var(--fg3)}
+#wdmap{width:100%;height:360px;border-radius:var(--r);background:var(--bg);position:relative;overflow:hidden;z-index:1}
+#wdCenterBtn{position:absolute;top:8px;right:8px;z-index:1001;width:36px;height:36px;background:rgba(21,21,20,.85);border:1px solid var(--bd2);border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;color:var(--fg)}
+.sw-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--bd);min-height:44px}
+.sw-row:last-child{border-bottom:none}
+.sw{position:relative;width:44px;height:24px;cursor:pointer;flex-shrink:0}
+.sw input{opacity:0;width:0;height:0}
+.sw-t{position:absolute;inset:0;background:var(--bg3);border-radius:12px;transition:.2s}
+.sw-t:before{content:'';position:absolute;width:18px;height:18px;left:3px;bottom:3px;background:var(--fg2);border-radius:50%;transition:.2s}
+.sw input:checked+.sw-t{background:var(--accent)}.sw input:checked+.sw-t:before{transform:translateX(20px);background:#fff}
+#toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:500;padding:10px 20px;border-radius:var(--r);font-size:13px;font-weight:600;pointer-events:none;opacity:0;transition:opacity .3s;background:rgba(30,30,28,.92);color:var(--fg);border:1px solid var(--bd2);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);box-shadow:0 4px 16px rgba(0,0,0,.4)}
+#toast.on{opacity:1}
+#connbar{display:none;position:sticky;top:0;z-index:201;background:rgba(251,191,36,.08);border-bottom:1px solid rgba(251,191,36,.2);padding:10px 16px;align-items:center;justify-content:center;gap:8px;font-size:12px;color:var(--warn);font-weight:600;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+#jobbar{display:none;position:sticky;top:0;z-index:200;background:rgba(167,139,250,.06);border-bottom:1px solid rgba(167,139,250,.2);padding:10px 16px;align-items:center;gap:10px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+#jbtext{flex:1;font-size:12px;font-weight:700;color:var(--accent);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#morsheet{display:none;position:fixed;inset:0;z-index:350;background:rgba(0,0,0,.5);align-items:flex-end;justify-content:center}
+#morpanel{background:var(--bg2);border:1px solid var(--bd);border-radius:var(--r2) var(--r2) 0 0;padding:16px 16px calc(16px + env(safe-area-inset-bottom));width:100%;max-width:520px}
+.morgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+.moritem{display:flex;flex-direction:column;align-items:center;gap:5px;padding:14px 8px;border-radius:var(--r);border:1px solid var(--bd);background:var(--bg3);cursor:pointer;font:700 11px var(--sans);color:var(--fg2);transition:all .12s;min-height:68px;width:100%}
+.moritem svg{width:22px;height:22px;color:var(--accent)}
+.moritem:active{background:rgba(167,139,250,.1);border-color:var(--accent);color:var(--accent)}
+nav{position:fixed;bottom:0;left:0;right:0;z-index:100;display:flex;background:rgba(13,13,11,.92);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-top:1px solid var(--bd);padding:4px 8px calc(4px + env(safe-area-inset-bottom))}
+.nb{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 0;font:600 10px var(--sans);color:var(--fg3);background:none;border:none;cursor:pointer;transition:color .12s}
+.nb svg{width:22px;height:22px;stroke-width:1.6}
+.nb.on{color:var(--accent)}
+.nb.on svg{filter:drop-shadow(0 0 6px rgba(167,139,250,.35))}
+.le{color:var(--fg3);font-size:13px;text-align:center;padding:16px}
+#term{max-height:400px;overflow-y:auto;background:var(--bg);border:1px solid var(--bd);border-radius:var(--r);padding:8px 10px;font:12px/1.6 var(--mono);color:var(--ok);scrollbar-width:thin;min-height:100px}
+#term div{white-space:pre-wrap;word-break:break-all}
+.note{font-size:12px;color:var(--fg3);margin-top:6px}
+.warn{font-size:12px;color:var(--warn);background:rgba(251,191,36,.05);border:1px solid rgba(251,191,36,.12);border-radius:var(--r);padding:8px 12px;margin-bottom:10px}
+.cnt{font-size:11px;font-weight:700;background:var(--crit);color:#fff;padding:1px 7px;border-radius:10px;margin-left:6px}
+.leaflet-container{background:var(--bg2)}
+.acon{display:flex;gap:6px;margin-top:8px;align-items:center}
+.li{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--bd);min-height:36px}
+.li.sel{background:rgba(167,139,250,.06);border-left:3px solid var(--accent)}
+.li.wps::after{content:"WPS";font-size:9px;font-weight:700;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:1px 4px;margin-left:auto}
+.ss{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:4px}
+.nfo{flex:1;min-width:0}
+.sig{display:flex;align-items:flex-end;gap:1px;width:14px;height:14px;flex-shrink:0}
+.sig span{width:3px;border-radius:1px;background:var(--accent)}
+.sig span.off{background:var(--bg3)}
+.rss{font-size:11px;color:var(--fg2);font-family:var(--mono)}
+.mac{font-size:11px;color:var(--fg3);font-family:var(--mono)}
+.chb{font-size:10px;padding:1px 5px;border-radius:4px;background:rgba(96,165,250,.1);color:var(--info);font-weight:700}
+.bdg{font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;background:rgba(244,63,94,.1);color:var(--crit);border:1px solid rgba(244,63,94,.2)}
+.lk{width:12px;height:12px;vertical-align:middle;margin-left:3px;flex-shrink:0;color:var(--fg3)}
+.devtog{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--bd);min-height:44px}
+.devtog:last-child{border-bottom:none}
+.devtog-lbl{font-size:14px;color:var(--fg);flex:1}
+.devswitch{position:relative;width:44px;height:24px;cursor:pointer;flex-shrink:0}
+.devswitch .track{position:absolute;inset:0;background:var(--bg3);border-radius:12px;transition:.2s}
+.devswitch input{position:absolute;opacity:0;width:0;height:0}
+.devswitch.on .track,.devswitch input:checked+.track{background:var(--accent)}
+.devswitch .thumb{position:absolute;width:18px;height:18px;left:3px;top:3px;background:var(--fg2);border-radius:50%;transition:.2s}
+.devswitch.on .thumb,.devswitch input:checked~.thumb{transform:translateX(20px);background:#fff}
+.hg{font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px}
+.hg-full{background:rgba(52,211,153,.1);color:var(--ok)}
+.hg-pmkid{background:rgba(96,165,250,.1);color:var(--info)}
+.dm-count{font-size:12px;font-weight:700;color:var(--fg2)}
+.dm-segments{display:inline-flex;align-items:flex-end;gap:1px;height:14px;vertical-align:middle}
+.dm-segments i{display:block;width:3px;border-radius:1px;background:var(--ok)}
+.dm-segments i.off{background:var(--bg3)}
+.dm-signal{display:inline-flex;align-items:center;gap:5px;font-size:11px}
+.command-category{margin-bottom:12px}
+.command-category summary{font:700 12px var(--sans);color:var(--fg2);cursor:pointer}
+.command-choice{display:inline-block;padding:3px 8px;margin:3px;font:12px var(--mono);color:var(--accent);background:var(--bg3);border:1px solid var(--bd);border-radius:6px;cursor:pointer}
+.command-choice:active{background:rgba(167,139,250,.12)}
+.cpw{font-size:12px;color:var(--fg2);overflow-y:auto;max-height:200px;scrollbar-width:thin}
+.off{opacity:.4}
+.wdrow{transition:background .1s}
+.wdrow:hover,.wd-active-row{background:rgba(167,139,250,.06)}
+.fixb{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:700;margin-bottom:12px}
+.fix-no{border:1px solid rgba(244,63,94,.2);background:rgba(244,63,94,.04);color:var(--crit)}
+.fix-ok{border:1px solid rgba(52,211,153,.2);background:rgba(52,211,153,.04);color:var(--ok)}
+.fixd{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+</style>
+
+</head>
+<body>
+<div id="connbar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M1 1l22 22M16.72 11.06A10.94 10.94 0 0119 12.55M5 12.55a10.94 10.94 0 015.17-2.39M10.71 5.05A16 16 0 0122.56 9M1.42 9a15.91 15.91 0 014.7-2.88M8.53 16.11a6 6 0 016.95 0M12 20h.01"/></svg>Sin conexión &mdash; reconectando&hellip;</div>
+<div id="jobbar"><div id="jbtext"></div><button class="b bd bs" id="jbstop" onclick="doStop()">DETENER</button></div>
+<div id="toast"></div>
+<main>
+<!-- HOME -->
+<div id="p-home" class="pg on">
+<div class="ph">PWNTERREY</div>
+<div class="c" style="text-align:center;padding:18px">
+<div id="hs" style="display:none"></div>
+<div id="hrem" style="font-size:12px;color:var(--fg3);margin-top:4px"></div>
+</div>
+<div class="c">
+<div class="ct">Sistema</div>
+<div id="hi" style="font-size:13px;color:var(--fg2)">Conectando&hellip;</div>
+<div style="margin-top:8px">
+<div class="kv"><span class="kl">RAM libre</span><span class="kvv" id="hram">-</span></div>
+<div class="bar"><div class="bar-f" id="hramb" style="width:0%"></div></div>
+<div class="kv"><span class="kl">RAM minima</span><span class="kvv" id="hrammin" style="color:var(--warn)">-</span></div>
+<div class="kv"><span class="kl">Clientes</span><span class="kvv" id="hapcli">-</span></div>
+</div>
+</div>
+<div class="c">
+<div class="ct">Acciones rapidas</div>
+<div class="g2">
+<button class="b bp" onclick="qScan()">Escanear WiFi</button>
+<button class="b bo" onclick="qHs()">Captura rapida</button>
+<button class="b bo" onclick="go('monitor',document.getElementById('nb-mon'))">Monitores</button>
+<button class="b bo" onclick="openMor();morGo('settings')">Ajustes</button>
+</div>
+</div>
+</div>
+<!-- WIFI -->
+<div id="p-wifi" class="pg">
+<div class="ph">WiFi Scanner</div>
+<div class="c">
+<div class="fr" style="margin-bottom:10px">
+<button id="bscan" class="b bp" style="flex:1" onclick="doScan()">Escanear</button>
+<button class="b bo bs" onclick="doCve()">CVE Check</button>
+</div>
+<div id="ss" style="font-size:13px;color:var(--fg3)"></div>
+<div id="cveout" style="font-size:13px;display:none;margin-top:8px"></div>
+</div>
+<div class="c" style="padding:0;overflow:hidden">
+<div style="padding:10px 14px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--bd)">
+<span id="ac" style="font-size:13px;font-weight:600;color:var(--fg2)">0 redes</span>
+<div class="fr" style="gap:6px">
+<button class="b bo bs" onclick="window.open('/api/export/scan')">CSV</button>
+<button class="b bo bs" onclick="selAll()">Sel. todo</button>
+</div>
+</div>
+<div id="al"><div class="le">Pulsa Escanear</div></div>
+</div>
+</div>
+<!-- ATTACKS -->
+<div id="p-attack" class="pg">
+<div class="ph">Ataques</div>
+<div id="aab" class="aab">
+<div><div style="font-weight:700;color:var(--crit)" id="aabn">Ataque</div><div style="font-size:11px;color:var(--fg3)" id="aabt"></div></div>
+<button class="b bd bs" onclick="doStop()">Detener</button>
+</div>
+<div class="ag" id="acs"></div>
+<div class="c">
+<div class="ct">Captura Handshake</div>
+<div class="note" style="margin:-4px 0 10px">Captura handshakes WPA2/PMKID. Selecciona una red o deja en pasivo para capturar de todas.</div>
+<select id="htgt" class="inp" style="margin-bottom:8px"><option value="">Pasivo (todos los canales)</option></select>
+<div class="fr" style="margin-bottom:10px">
+<label class="ck"><input type="checkbox" id="hdea" checked> Deauth</label>
+<select id="hdur" class="inp" style="flex:1"><option value="10">10s</option><option value="30">30s</option><option value="60" selected>1m</option><option value="120">2m</option><option value="300">5m</option></select>
+</div>
+<button class="b bp" id="bhs" onclick="doHs()">Iniciar captura</button>
+<div id="hsw" style="margin-top:14px">
+<div class="fr" style="justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:6px">
+<span id="hslive" style="font-size:12px;font-weight:700;color:var(--accent)">Detenida</span>
+<div class="fr" style="gap:6px">
+<span id="hsc" style="font-size:12px;color:var(--fg2)">0 handshakes</span>
+<button class="b bo bs" onclick="clearHandshakes()">Limpiar</button>
+<button class="b bo bs" onclick="window.open('/api/export/handshake')">CSV</button>
+</div>
+</div>
+<div class="mt-wrap"><table class="mt"><thead><tr><th>BSSID</th><th>SSID</th><th>Ch</th><th>dBm</th><th>Tipo</th><th>Estado</th></tr></thead><tbody id="hsb"><tr><td colspan="6" class="le">Esperando capturas&hellip;</td></tr></tbody></table></div>
+</div>
+</div>
+<div class="c">
+<div class="ct">Sniffer</div>
+<div class="pills" id="snp"></div>
+<div class="fr">
+<select id="snd" class="inp" style="flex:1"><option value="10">10s</option><option value="30">30s</option><option value="60">1m</option><option value="120">2m</option><option value="300">5m</option><option value="0" selected>Indefinido</option></select>
+<button class="b bp bs" onclick="doSniff()">Iniciar</button>
+</div>
+<div class="fr" style="justify-content:space-between;margin-top:8px"><span id="snstatus" style="font-size:12px;color:var(--fg2)">Detenido</span><span id="sncount" style="font-size:11px;color:var(--fg3)">0 / 200</span></div>
+<div id="snfeed" class="sf" style="margin-top:8px">Inicia el sniffer para ver la captura.</div>
+<div class="fr" style="margin-top:8px">
+<button class="b bo bs" style="flex:1" onclick="clearSniffer()">Limpiar</button>
+<button class="b bo bs" style="flex:1" onclick="exportSniffer()">Exportar</button>
+<button class="b bo bs" id="snstop" style="flex:1" disabled onclick="stopSniffer()">Detener</button>
+</div>
+</div>
+<div class="c">
+<div class="ct">Evil Twin</div>
+<input id="essid" class="inp" placeholder="SSID objetivo" style="margin-bottom:8px">
+<input id="ech" type="number" min="1" max="177" value="1" class="inp" placeholder="Canal" style="margin-bottom:10px">
+<div class="ct">Plantilla</div>
+<div class="tpg" id="etpg">
+<div class="tpc on" onclick="tplSel('generic',this)"><div class="tpn">Genérico</div><div class="tpd">Portal simple</div></div>
+<div class="tpc" onclick="tplSel('wifi',this)"><div class="tpn">WiFi Login</div><div class="tpd">Clon router</div></div>
+<div class="tpc" onclick="tplSel('corp',this)"><div class="tpn">Corporativo</div><div class="tpd">Portal empresa</div></div>
+<div class="tpc" onclick="tplSel('custom',this)"><div class="tpn">Personalizada</div><div class="tpd">Tu plantilla</div></div>
+</div>
+<div class="fr" style="margin-bottom:8px;gap:8px">
+<span style="font-size:13px;color:var(--fg3);flex-shrink:0">Duración</span>
+<select id="edur" class="inp" style="flex:1"><option value="60">1m</option><option value="120">2m</option><option value="300" selected>5m</option><option value="600">10m</option><option value="0">Indefinido</option></select>
+</div>
+<div class="warn">El dashboard se desconectará durante el ataque.</div>
+<button class="b bd" onclick="doEvil()">Activar Evil Twin</button>
+<details style="margin-top:10px"><summary style="font-size:12px;color:var(--fg3);cursor:pointer">Plantilla personalizada</summary>
+<textarea id="ehtml" class="inp" rows="3" placeholder="Pega tu HTML..." style="margin-top:8px"></textarea>
+<button class="b bo bs" style="margin-top:6px" onclick="upTpl()">Subir</button>
+<div id="etst" class="note"></div>
+</details>
+<div style="margin-top:12px">
+<div class="ct">Capturas<span id="ecnt" class="cnt" style="display:none"></span></div>
+<div id="ecap"><div class="le">Sin capturas</div></div>
+<div class="fr" style="margin-top:8px">
+<button class="b bo bs" style="flex:1" onclick="window.open('/api/export/captures')">Exportar</button>
+<button class="b bd bs" style="flex:1" onclick="clrCap()">Limpiar</button>
+</div>
+</div>
+</div>
+</div>
+<!-- MONITOR -->
+<div id="p-monitor" class="pg">
+<div class="ph">Monitores</div>
+<div class="mp">
+<button class="mb" id="mb-deauth" onclick="monToggle('deauth')">Deauth</button>
+<button class="mb" id="mb-probe" onclick="monToggle('probe')">Probes</button>
+<button class="mb" id="mb-signal" onclick="monToggle('signal')">Señal</button>
+</div>
+<section id="mw-deauth">
+<div class="note" style="margin:0 0 10px">Detecta ataques de desautenticación WiFi en el área. Cuando alguien intenta desconectar dispositivos de su red, lo verás aquí.</div>
+<div id="mdalert" class="c" style="border-color:var(--ok)">
+<div class="fr" style="justify-content:space-between;margin-bottom:8px"><span class="m-eye"><span class="m-led d-ok"></span>ESTADO</span><span style="font-size:10px;font-weight:700;color:var(--fg3);border:1px solid var(--bd2);border-radius:5px;padding:2px 8px">30s ventana</span></div>
+<div id="mdstatus" style="font-size:18px;font-weight:800;color:var(--ok);margin-bottom:4px">Sin ataques</div>
+<div id="mdcount" style="font-size:12px;color:var(--fg2)">0 deauths detectados</div>
+<div id="mdlast" style="font-size:11px;color:var(--fg3);margin-top:4px">Ultimo: sin eventos</div>
+<div id="mdcapture" style="font-size:11px;color:var(--fg3);border-top:1px solid var(--bd);padding-top:8px;margin-top:8px">Monitor detenido</div>
+</div>
+<div class="fr" style="justify-content:space-between;margin-bottom:6px"><span style="font-size:12px;font-weight:700;color:var(--fg2)">Atacantes</span><span id="mdrows" style="font-size:11px;color:var(--fg3)">0 / 50</span></div>
+<div class="mt-wrap"><table class="mt"><thead><tr><th>Atacante</th><th>Victima</th><th>Ch</th><th>dBm</th><th>#</th><th>Visto</th></tr></thead><tbody id="mdb"><tr><td colspan="6" class="le">Sin eventos</td></tr></tbody></table></div>
+<div class="note">MAC de origen observada. Maximo 50 atacantes recientes.</div>
+</section>
+<div id="mw-probe" style="display:none">
+<div class="note" style="margin:0 0 8px">Redes que dispositivos cercanos buscan</div>
+<div class="mt-wrap"><table class="mt"><thead><tr><th>MAC</th><th>SSID</th><th>dBm</th><th>Hace</th></tr></thead><tbody id="mpb"></tbody></table></div>
+</div>
+<div id="mw-signal" style="display:none">
+<select id="msigap" class="inp" style="margin-bottom:8px" onchange="monSigSel()"></select>
+<div id="sigdb" style="font-size:28px;font-weight:800;font-family:var(--mono);text-align:center;margin:12px 0">-- dBm</div>
+<div class="bar" style="height:8px"><div class="bar-f" id="sigfill" style="width:0%;background:var(--ok)"></div></div>
+</div>
+</div>
+<!-- BLE/NFC -->
+<div id="p-ble" class="pg">
+<div class="ph">Bluetooth</div>
+<div class="c">
+<div class="ct">BLE Spam</div>
+<div class="pills" id="bkp"></div>
+<div class="fr">
+<select id="bdr" class="inp" style="flex:1"><option value="10">10s</option><option value="30" selected>30s</option><option value="60">1m</option><option value="120">2m</option><option value="300">5m</option><option value="0">Indefinido</option></select>
+<button class="b bp bs" onclick="doBle()">Iniciar</button>
+</div>
+<div id="bst" class="note"></div>
+</div>
+<div class="c">
+<div class="ct">BLE Scanner</div>
+<div class="fr">
+<select id="bsd" class="inp" style="flex:1"><option value="10">10s</option><option value="30" selected>30s</option><option value="60">1m</option><option value="120">2m</option></select>
+<button class="b bp bs" onclick="doBScan()">Escanear</button>
+</div>
+<div class="note">Resultados en Terminal. Requiere RAM disponible.</div>
+</div>
+</div>
+<!-- NFC -->
+<div id="p-nfc" class="pg">
+<div class="ph">NFC</div>
+<div class="c">
+<div class="ct">Tag actual</div>
+<div id="nfo" style="font-size:13px;color:var(--fg2)">Acerca un tag NFC&hellip;</div>
+<button class="b bo bs" style="margin-top:8px" onclick="fNfc()">Leer</button>
+</div>
+<div class="c">
+<div class="ct">Escribir NFC</div>
+<div style="margin-bottom:8px">
+<input id="nu" class="inp" placeholder="https://ejemplo.com" style="margin-bottom:6px">
+<button class="b bp bs" onclick="nWrite('write-url','nu')">URL</button>
+</div>
+<div style="margin-bottom:8px">
+<input id="nx" class="inp" placeholder="Texto libre" style="margin-bottom:6px">
+<button class="b bp bs" onclick="nWrite('write-text','nx')">Texto</button>
+</div>
+<details><summary style="font-size:12px;color:var(--fg3);cursor:pointer">RAW (hex)</summary>
+<textarea id="nhex" class="inp" rows="2" placeholder="04 A3 2F ..." style="margin-top:6px"></textarea>
+<div class="fr" style="margin-top:6px">
+<input id="nblk" type="number" min="1" max="255" value="4" class="inp" style="width:80px;flex-shrink:0" placeholder="Blk">
+<button class="b bp bs" style="flex:1" onclick="nRaw()">Escribir RAW</button>
+</div>
+</details>
+<div id="ns" class="note"></div>
+</div>
+</div>
+<!-- WARDRIVE -->
+<div id="p-map" class="pg">
+<div class="ph">Wardrive</div>
+<div class="fr" style="justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+<div id="wdGpsPill" class="pill p-crit"><span id="wdGpsDot" class="dot d-c"></span><span id="wdGpsLbl">Sin GPS</span></div>
+<button onclick="gpsRestart()" style="padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.06);color:var(--fg2);font-size:11px;font-weight:600;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation">↻ GPS</button>
+<div id="wdcount" style="font-size:14px;font-weight:700;color:var(--fg2)">0 redes</div>
+</div>
+<div class="c" style="padding:12px">
+<div class="ct">Control</div>
+<div id="wdStartRow" style="display:flex;flex-direction:column;gap:8px">
+<select id="wdDur" class="inp"><option value="0" selected>Indefinido</option><option value="60">1m</option><option value="300">5m</option><option value="600">10m</option></select>
+<div class="g2">
+<button class="b bp" onclick="wdStart('wifi')">WiFi</button>
+<button class="b bo" onclick="wdStart('bt')">Bluetooth</button>
+</div>
+</div>
+<div id="wdStopRow" style="display:none">
+<div style="display:flex;align-items:center;gap:8px;background:rgba(244,63,94,.04);border:1px solid rgba(244,63,94,.12);border-radius:var(--r);padding:10px 12px;margin-bottom:8px">
+<span class="dot d-c" style="animation:pl 1.4s infinite"></span>
+<span id="wdActiveType" style="font-weight:700;color:var(--crit);flex:1;font-size:13px">Wardrive activo</span>
+<span style="font-size:10px;color:var(--info);font-weight:700">AUTO</span>
+</div>
+<button class="b bd" onclick="wdStop()">Detener</button>
+</div>
+</div>
+<div class="c" style="padding:10px">
+<div id="wdmap"><canvas id="wdcanvas" style="width:100%;height:100%;display:block;touch-action:none"></canvas>
+<div id="wdnodata" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--fg3);font-size:13px;text-align:center;padding:20px;pointer-events:none">Inicia un wardrive</div>
+<button id="wdCenterBtn" onclick="wdCenter()" title="Centrar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg></button>
+</div>
+<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;font-size:10px;font-weight:700">
+<span style="display:inline-flex;align-items:center;gap:3px"><span style="width:7px;height:7px;border-radius:50%;background:#f44"></span>OPEN</span>
+<span style="display:inline-flex;align-items:center;gap:3px"><span style="width:7px;height:7px;border-radius:50%;background:#f80"></span>WEP</span>
+<span style="display:inline-flex;align-items:center;gap:3px"><span style="width:7px;height:7px;border-radius:50%;background:#fd0"></span>WPA</span>
+<span style="display:inline-flex;align-items:center;gap:3px"><span style="width:7px;height:7px;border-radius:50%;background:#4f4"></span>WPA2</span>
+<span style="display:inline-flex;align-items:center;gap:3px"><span style="width:7px;height:7px;border-radius:50%;background:#0df"></span>WPA3</span>
+</div>
+</div>
+<div class="c" style="padding:0;overflow:hidden">
+<div style="padding:10px 14px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--bd)">
+<span style="font-size:13px;font-weight:700;color:var(--fg2)">Redes</span>
+<span id="wdListCount" style="font-size:12px;color:var(--fg3)">0</span>
+</div>
+<div id="wdlist" style="max-height:240px;overflow-y:auto;scrollbar-width:thin"><div class="le">Sin datos</div></div>
+</div>
+<div class="c">
+<div class="g2">
+<button class="b bp" onclick="wdMapExport()">Exportar CSV</button>
+<button class="b bd" onclick="wdMapClear()">Limpiar firmware</button>
+<button class="b bd" onclick="wdCacheClear()">Limpiar cache</button>
+<button class="b bo" id="wdCacheBtn" onclick="wdPreCache()">Cachear Tiles</button>
+<button class="b bo" onclick="wdCenter()">Centrar</button>
+</div>
+</div>
+</div>
+<!-- GPS -->
+<div id="p-gps" class="pg">
+<div class="ph">GPS</div>
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+<div id="gfix" style="display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:20px;border:1px solid rgba(244,63,94,.2);background:rgba(244,63,94,.04);color:var(--crit);font-size:12px;font-weight:700"><span class="dot d-c"></span>Sin señal GPS</div>
+<div id="gpsSignalBar" style="display:flex;align-items:flex-end;gap:2px;height:18px"></div>
+<button onclick="gpsRestart()" style="padding:8px 16px;border-radius:10px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.06);color:var(--fg2);font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent;touch-action:manipulation">↻ Reiniciar GPS</button>
+</div>
+<div id="gpsProgress" style="display:none;margin-bottom:12px"></div>
+<div class="c"><div class="ct">Datos GPS</div><div id="gd" class="le">Cargando&hellip;</div></div>
+</div>
+<!-- TERMINAL -->
+<div id="p-term" class="pg">
+<div class="ph">Terminal</div>
+<div class="c" style="padding:10px">
+<div id="term"></div>
+<details><summary style="font-size:12px;color:var(--fg3);cursor:pointer">Comandos</summary>
+<div style="font-size:11px;color:var(--fg3);margin:6px 0">Toca para copiar al input</div>
+<div id="command-categories"></div>
+</details>
+<div class="fr" style="margin-top:8px">
+<input id="tc" class="inp" style="font-family:var(--mono);font-size:13px" placeholder="comando..." onkeydown="if(event.key==='Enter')sCmd();else if(event.key==='ArrowUp'){event.preventDefault();if(_cmdIdx>0){_cmdIdx--;this.value=_cmdHist[_cmdIdx]}}else if(event.key==='ArrowDown'){event.preventDefault();if(_cmdIdx<_cmdHist.length-1){_cmdIdx++;this.value=_cmdHist[_cmdIdx]}else{_cmdIdx=_cmdHist.length;this.value=''}}">
+<button class="b bp bs" onclick="sCmd()">Enviar</button>
+<button class="b bo bs" onclick="clrTerm()">Limpiar</button>
+<button class="b bo bs" onclick="exportLogs()">Exportar</button>
+</div>
+</div>
+</div>
+<!-- SETTINGS -->
+<div id="p-settings" class="pg">
+<div class="ph">Ajustes</div>
+<div class="c" id="devsets">
+<div class="ct">Dispositivo</div>
+<div id="devsets-list"><div class="le">Cargando&hellip;</div></div>
+</div>
+<div class="c">
+<div class="ct">Lista SSID</div>
+<div id="sl" style="margin-bottom:8px"><div class="le">Cargando&hellip;</div></div>
+<div class="fr" style="margin-bottom:6px">
+<input id="sadd" class="inp" placeholder="Nombre SSID">
+<button class="b bo bs" onclick="ssidAdd()">+</button>
+</div>
+<textarea id="sblk" class="inp" rows="3" placeholder="Importar: un SSID por linea" style="margin-bottom:6px"></textarea>
+<div class="fr" style="margin-bottom:6px">
+<button class="b bo bs" style="flex:1" onclick="ssidImp()">Importar</button>
+<input id="sgen" type="number" min="1" max="100" value="10" class="inp" style="width:70px;flex-shrink:0">
+<button class="b bo bs" style="flex:1" onclick="ssidGen()">Generar</button>
+</div>
+<button class="b bd bs" onclick="ssidClr()">Borrar lista</button>
+</div>
+<div class="c"><div class="ct">Canal WiFi</div><div class="fr"><input id="sch" type="number" min="1" max="177" value="1" class="inp" style="width:80px;flex-shrink:0"><button class="b bo bs" style="flex:1" onclick="sCh()">Cambiar</button></div></div>
+<div class="c"><div class="ct">SPIFFS</div>
+<div id="spinf" style="font-size:13px;color:var(--fg2)">Cargando&hellip;</div>
+<div class="bar" style="margin:6px 0"><div class="bar-f" id="spbar" style="width:0%"></div></div>
+<div id="spfiles" style="font-size:12px"></div>
+</div>
+<div class="c"><div class="ct">Actualización OTA</div>
+<input id="otaf" type="file" accept=".bin" class="inp" style="padding:8px 12px;margin-bottom:8px">
+<button class="b bp" id="otab" onclick="upOta()">Subir</button>
+<div id="otapw" style="display:none;margin-top:10px"><div class="fr" style="justify-content:space-between;margin-bottom:4px"><span style="font-size:12px;color:var(--fg3)">Subiendo&hellip;</span><span id="otapc" class="kvv" style="font-size:12px">0%</span></div><div class="bar"><div class="bar-f" id="otapb" style="width:0%"></div></div></div>
+<div id="otamsg" style="display:none;margin-top:8px;font-size:13px;font-weight:700"></div>
+<div class="warn" style="margin-top:8px">No desconectar durante la actualización</div>
+</div>
+<div class="c"><div class="ct">Badge</div><div id="bgi" style="font-size:13px;color:var(--fg2)">-</div></div>
+<div class="c"><button class="b bd" onclick="doReboot()">Reiniciar badge</button><div class="note" style="text-align:center">Se pedirá confirmación</div></div>
+</div>
+</main>
+<!-- Evil Twin modal -->
+<div id="emod" style="display:none;position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.7);align-items:center;justify-content:center">
+<div class="c" style="max-width:320px;width:90%;text-align:center;margin:0">
+<div style="font-weight:800;font-size:18px;margin-bottom:8px;color:var(--crit)">Evil Twin Activo</div>
+<div id="emsg" style="font-size:14px;color:var(--fg2);margin-bottom:12px"></div>
+<div id="emod-cdwrap" style="display:none;margin-bottom:10px">
+<div style="font-size:32px;font-weight:900;color:var(--crit);font-variant-numeric:tabular-nums" id="emod-cd">--</div>
+<div style="font-size:11px;color:var(--fg3)">seg para reconexión</div>
+</div>
+<button class="b bo" onclick="document.getElementById('emod').style.display='none'">Entendido</button>
+</div>
+</div>
+<!-- More sheet -->
+<div id="morsheet" onclick="closeMor()">
+<div id="morpanel" onclick="event.stopPropagation()">
+<div class="fr" style="justify-content:space-between;margin-bottom:4px">
+<span style="font-size:14px;font-weight:700">Mas funciones</span>
+<button class="b bo bs" onclick="closeMor()" style="width:auto">&#10005;</button>
+</div>
+<div class="morgrid">
+<button class="moritem" onclick="morGo('gps')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="10" r="3"/><path d="M12 21.7C17.3 17 20 13 20 10a8 8 0 10-16 0c0 3 2.7 7 8 11.7z"/></svg>GPS</button>
+<button class="moritem" onclick="morGo('map')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>Wardrive</button>
+<button class="moritem" onclick="morGo('term')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>Terminal</button>
+<button class="moritem" onclick="morGo('settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M18.66 5.34l1.41-1.41"/></svg>Ajustes</button>
+</div>
+</div>
+</div>
+<!-- Navigation -->
+<nav id="nav">
+<button class="nb on" id="nb-home" onclick="go('home',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>Inicio</button>
+<button class="nb" id="nb-wifi" onclick="go('wifi',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 12.55a11 11 0 0114 0"/><path d="M8.53 16.11a6 6 0 016.95 0"/><circle cx="12" cy="20" r="1"/></svg>WiFi</button>
+<button class="nb" id="nb-attack" onclick="go('attack',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>Ataques</button>
+<button class="nb" id="nb-mon" onclick="go('monitor',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>Monitor</button>
+<button class="nb" id="nb-ble" onclick="go('ble',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6.5 6.5l11 11L12 23V1l5.5 5.5-11 11"/></svg>BLE</button>
+<button class="nb" id="nb-nfc" onclick="go('nfc',this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M8 4v16"/><path d="M12 8v8"/></svg>NFC</button>
+<button class="nb" id="nb-mor" onclick="openMor()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>Mas</button>
+</nav>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+# Build artifacts
+build/
+*.o
+*.d
+*.elf
+*.map
+*.merged.bin
+compile_commands.json
+includes.cache
+libraries.cache
+build_opt.h
+file_opts
+flash_args
+sdkconfig
+
+# IDE
+.theia/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backups
+backups/
+PreviousVersions/
+
+# Old binaries
+*.esp32s3.bin
