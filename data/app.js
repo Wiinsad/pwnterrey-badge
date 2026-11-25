@@ -288,7 +288,7 @@ function rBkp(){var h='';BKS.forEach(function(k){h+='<button class="p'+(k[0]===b
 function bkSet(k){bk=k;rBkp()}
 function doBle(){document.getElementById('bst').innerHTML='<span style="color:var(--info)">Iniciando...</span>';
 ap('/api/ble',{action:'spam',kind:bk,duration:parseInt(document.getElementById('bdr').value)}).then(function(r){
-if(r&&r.ok)document.getElementById('bst').innerHTML='<span style="color:var(--ok)">BLE spam activo</span>';
+if(r&&r.ok){document.getElementById('bst').innerHTML='<span style="color:var(--ok)">BLE spam activo</span>'+(r.note?'<div class="muted" style="margin-top:6px;font-size:12px">⚠ '+esc(r.note)+'</div>':'');toast(r.note||'BLE spam activo');}
 else if(r&&r.code==='ble_no_memory'){document.getElementById('bst').innerHTML='<span style="color:var(--crit)">Memoria insuficiente para iniciar Bluetooth</span>';toast('Memoria insuficiente para BLE');}
 else{document.getElementById('bst').innerHTML='<span style="color:var(--crit)">'+(r&&r.output?esc(r.output):'Error al iniciar')+'</span>';toast(r&&r.output||'Error al iniciar');}
 })}

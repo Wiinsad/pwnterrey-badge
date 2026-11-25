@@ -1476,7 +1476,9 @@ void EvilPortal::setupManagementServer() {
     server.send(200, "application/json; charset=utf-8",
       "{\"ok\":true,\"state\":\"attack\",\"kind\":\"" + mgmtJsonEscape(kind) +
       "\",\"duration\":" + String(duration) +
-      (needTeardown ? ",\"note\":\"WiFi desactivado durante BLE\"" : "") + "}");
+      (duration > 0
+        ? ",\"note\":\"WiFi se apaga durante BLE. Al terminar los " + String(duration) + "s el badge se reinicia solo y vuelve el panel.\""
+        : ",\"note\":\"WiFi se apaga durante BLE (modo indefinido). Presiona RESET para terminar y reiniciar a modo normal.\"") + "}");
 
     // Now tear down WiFi if BLE not initialized
     if (needTeardown) {
@@ -2979,6 +2981,17 @@ void EvilPortal::mgmtServiceJob() {
         Serial.printf("[MGMT] Handshake capture stopped: %u entries\n", (unsigned)hs_count);
       }
       cli_obj.runCommand("stopscan");
+      // BLE jobs leave NimBLE resident on the C5 (deinit triggers a watchdog
+      // reset), permanently starving the heap so the re-armed AP can't accept
+      // clients. Reboot instead: restores full heap and clean management mode.
+      // Matches the operator model: timed BLE ends -> badge restarts to normal.
+      if (this->mgmt_job_kind.startsWith("blespam") ||
+          this->mgmt_job_kind == "ble-scan") {
+        Serial.println("[MGMT] BLE job finished; rebooting to restore full heap");
+        SerialMirror::logDrain();
+        delay(200);
+        ESP.restart();
+      }
       this->mgmt_job_state = MGMT_JOB_REARM;
       this->mgmt_job_t0    = now;
     }
@@ -3208,6 +3221,10 @@ void EvilPortal::mainManagement() {
     }
 
     server.handleClient();
-    this->mgmtServiceJob();
   }
+
+  // The job timer MUST run on every loop pass, even when the AP is torn down
+  // (BLE spam/scan sets management_active=false). Otherwise duration-limited
+  // BLE jobs would never auto-stop and re-arm the management AP.
+  this->mgmtServiceJob();
 }
