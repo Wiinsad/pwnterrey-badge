@@ -2,7 +2,7 @@
   <img src="assets/logo.png" alt="Pwnterrey Badge" width="400">
 </p>
 
-<h1 align="center">🦆 Pwnterrey Badge</h1>
+<h1 align="center">Pwnterrey Badge</h1>
 <p align="center">
   <strong>Firmware v2.1</strong> · ESP32-C5 · Pwnterrey 2026<br>
   <em>Badge oficial de la comunidad Pwnterrey — basado en ESP32 Marauder</em>
