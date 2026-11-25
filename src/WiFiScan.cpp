@@ -894,8 +894,8 @@ bool WiFiScan::ensureBLE() {
   if (this->ble_initialized) return true;
 #ifdef MARAUDER_FLIPPER_C5
   size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  if (largest < 40000) {
-    Serial.printf("[BLE] ensureBLE: not enough RAM (largest block=%u B, need 40KB); skipping init\n",
+  if (largest < 24000) {
+    Serial.printf("[BLE] ensureBLE: not enough RAM (largest block=%u B, need 24KB); skipping init\n",
                   (unsigned)largest);
     return false;
   }

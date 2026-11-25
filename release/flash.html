@@ -3,58 +3,153 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Pwnterrey Badge Flasher</title>
+  <title>Pwnterrey Badge — Web Flasher</title>
   <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #0d1117;
-      color: #c9d1d9;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: #0a0a0a;
+      color: #e0e0e0;
+      min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      min-height: 100vh;
-      margin: 0;
-      padding: 20px;
     }
-    h1 { color: #58a6ff; }
-    p { max-width: 500px; text-align: center; line-height: 1.6; }
-    esp-web-install-button {
-      margin-top: 20px;
-    }
-    esp-web-install-button::part(invoke-button) {
-      background: #238636;
-      color: white;
-      border: none;
-      padding: 12px 32px;
-      border-radius: 8px;
-      font-size: 18px;
-      cursor: pointer;
-      font-weight: 600;
-    }
-    esp-web-install-button::part(invoke-button):hover {
-      background: #2ea043;
-    }
-    .note {
-      margin-top: 24px;
-      font-size: 14px;
-      color: #8b949e;
-      max-width: 500px;
+    .container {
+      max-width: 560px;
+      width: 90%;
       text-align: center;
+      padding: 2rem 1rem;
+    }
+    .logo {
+      max-width: 280px;
+      margin-bottom: 1.5rem;
+      filter: drop-shadow(0 0 24px rgba(200,255,0,0.25));
+    }
+    h1 {
+      font-size: 2rem;
+      font-weight: 800;
+      color: #c8ff00;
+      margin-bottom: 0.25rem;
+      letter-spacing: -0.5px;
+    }
+    .version {
+      font-size: 0.9rem;
+      color: #888;
+      margin-bottom: 2rem;
+    }
+    .card {
+      background: #141414;
+      border: 1px solid #222;
+      border-radius: 16px;
+      padding: 2rem;
+      margin-bottom: 2rem;
+    }
+    .card p {
+      color: #aaa;
+      line-height: 1.6;
+      margin-bottom: 1.5rem;
+      font-size: 0.95rem;
+    }
+    .steps {
+      text-align: left;
+      margin-bottom: 1.5rem;
+    }
+    .steps li {
+      color: #ccc;
+      margin-bottom: 0.5rem;
+      padding-left: 0.5rem;
+      font-size: 0.9rem;
+    }
+    .steps li strong {
+      color: #c8ff00;
+    }
+    esp-web-install-button {
+      display: inline-block;
+    }
+    esp-web-install-button button {
+      background: #c8ff00;
+      color: #0a0a0a;
+      border: none;
+      padding: 14px 40px;
+      font-size: 1.1rem;
+      font-weight: 700;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      letter-spacing: 0.5px;
+    }
+    esp-web-install-button button:hover {
+      background: #d4ff33;
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(200,255,0,0.3);
+    }
+    .unsupported {
+      display: none;
+    }
+    esp-web-install-button[install-unsupported] .unsupported {
+      display: block;
+      color: #ff6b6b;
+      font-size: 0.85rem;
+      margin-top: 1rem;
+    }
+    .footer {
+      color: #555;
+      font-size: 0.8rem;
+      margin-top: 1rem;
+    }
+    .footer a {
+      color: #c8ff00;
+      text-decoration: none;
+    }
+    .footer a:hover {
+      text-decoration: underline;
+    }
+    .chip-badge {
+      display: inline-block;
+      background: #1a1a1a;
+      border: 1px solid #333;
+      color: #c8ff00;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 4px 12px;
+      border-radius: 20px;
+      margin-bottom: 1.5rem;
+      letter-spacing: 1px;
     }
   </style>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
 </head>
 <body>
-  <h1>⚡ Pwnterrey Badge Flasher</h1>
-  <p>Conecta tu badge por USB, haz clic en el botón y listo. Necesitas Google Chrome o Microsoft Edge.</p>
+  <div class="container">
+    <img src="../assets/logo.png" alt="Pwnterrey" class="logo">
+    <h1>Badge Flasher</h1>
+    <span class="chip-badge">ESP32-C5</span>
+    <div class="version">Firmware v2.1 — Pwnterrey 2026</div>
 
-  <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+    <div class="card">
+      <p>Flashea el firmware del badge Pwnterrey directamente desde tu navegador. No necesitas instalar nada.</p>
+      <ol class="steps">
+        <li>Conecta tu badge por <strong>USB-C</strong></li>
+        <li>Haz clic en <strong>Instalar</strong></li>
+        <li>Selecciona el puerto serial</li>
+        <li>Espera a que termine (~60 segundos)</li>
+      </ol>
 
-  <p class="note">
-    Si el botón no aparece, asegúrate de usar Chrome/Edge y que tu badge esté conectado por USB.
-    En Linux puede que necesites permisos: <code>sudo usermod -a -G dialout $USER</code>
-  </p>
+      <esp-web-install-button manifest="manifest.json">
+        <button slot="activate">⚡ Instalar Firmware</button>
+        <span slot="unsupported" class="unsupported">
+          Tu navegador no soporta Web Serial.<br>
+          Usa <strong>Google Chrome</strong> o <strong>Microsoft Edge</strong> en escritorio.
+        </span>
+      </esp-web-install-button>
+    </div>
 
-  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+    <div class="footer">
+      <p>¿Problemas? Consulta el <a href="https://github.com/Wiinsad/pwnterrey-badge" target="_blank">README</a> para flasheo manual por terminal.</p>
+      <p style="margin-top:0.5rem">Pwnterrey 2026 · <a href="https://instagram.com/pwnterrey" target="_blank">@pwnterrey</a></p>
+    </div>
+  </div>
 </body>
 </html>

