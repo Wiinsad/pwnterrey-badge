@@ -98,8 +98,10 @@ var kb=d.heap?Math.round(d.heap/1024):0,pct=d.heap?Math.min(100,Math.round(d.hea
 // the management AP is down for the whole attack, so this is the only way the
 // reason for a failure ever reaches the operator without a serial cable.
 var etl=document.getElementById('etlast');
-if(etl){if(d.evil_last){etl.style.display='';etl.textContent=d.evil_last;
-etl.style.color=/FAILED|WARNING|could not/.test(d.evil_last)?'var(--crit)':'var(--fg2)'}
+if(etl){var et_txt=d.evil_last||'';
+if(typeof d.cp_probes!=='undefined')et_txt+=(et_txt?'\n':'')+'sondas de portal recibidas: '+d.cp_probes+(d.cp_probes>0?'  (el dispositivo SI llego al badge)':'  (ningun dispositivo nos ha consultado)');
+if(et_txt){etl.style.display='';etl.textContent=et_txt;
+etl.style.color=/FAILED|WARNING|ERR|could not/.test(et_txt)?'var(--crit)':'var(--fg2)'}
 else etl.style.display='none'}
 document.getElementById('hram').textContent=d.heap?kb+' KB':'-';
 document.getElementById('hramb').style.width=pct+'%';
