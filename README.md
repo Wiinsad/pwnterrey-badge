@@ -4,11 +4,12 @@
 
 <h1 align="center">Pwnterrey Badge</h1>
 <p align="center">
-  <strong>Firmware v2.1</strong> · ESP32-C5 · Pwnterrey 2026<br>
+  <strong>Firmware v2.3.8</strong> · ESP32-C5 · Pwnterrey 2026<br>
   <em>Badge oficial de la comunidad Pwnterrey — basado en ESP32 Marauder</em>
 </p>
 
 <p align="center">
+  <a href="https://github.com/Wiinsad/pwnterrey-badge/releases/latest">📦 Última versión</a> ·
   <a href="https://wiinsad.github.io/pwnterrey-badge/">⚡ Web Flasher</a> ·
   <a href="https://instagram.com/pwnterrey">Instagram</a> ·
   <a href="https://chat.whatsapp.com/CnUJOXwgPs94dOgPqq2Rxd">WhatsApp</a>
@@ -19,13 +20,17 @@
 ## ✨ Características
 
 - 📡 **Evil Twin / Evil Portal** — Captura de credenciales con portal cautivo personalizado
-- 📶 **WiFi Scanner** — Escaneo de redes, deauth, beacon spam
-- 📱 **BLE Spam** — Spam de paquetes BLE (iOS, Android, Windows, Samsung)
-- 🗺️ **Wardrive** — Mapeo de redes WiFi con GPS
-- 🔑 **WPS Attack** — Fuerza bruta y Pixie Dust para WPS
-- 🌐 **Web Interface** — Panel de control en `192.168.4.1`
-- 💾 **SD Card** — Almacenamiento de capturas y logs
-- 🔋 **Monitor de batería** — Estado en tiempo real
+- 📶 **WiFi Scanner** — Escaneo de redes y estaciones, deauth, beacon spam, probe flood
+- 📱 **BLE Spam** — Spam de paquetes BLE (Apple, Google, Samsung, Windows)
+- 🗺️ **Wardrive** — Mapeo de redes WiFi con GPS, y wardrive de BLE, exportable a Wigle
+- 🔑 **WPS Attack** — Fuerza bruta de PIN y Pixie Dust
+- 🏷️ **NFC** — Lectura y escritura de etiquetas
+- 📻 **Monitor de señal** — Gráfica de actividad por canal
+- 🌐 **Panel web** — Control completo desde `http://192.168.4.1`
+
+> **El badge no tiene pantalla ni botones.** Todo se opera desde el panel web.
+> Tampoco lleva ranura SD ni batería: se alimenta por USB-C y las credenciales
+> capturadas se guardan en la memoria flash interna (SPIFFS).
 
 ---
 
@@ -50,7 +55,9 @@ Instala `esptool` si no lo tienes:
 pip install esptool
 ```
 
-Descarga `badge-full.bin` de la carpeta [`release/`](release/) y ejecuta:
+Descarga `badge-full.bin` desde
+[**Releases**](https://github.com/Wiinsad/pwnterrey-badge/releases/latest)
+y ejecuta:
 
 ```bash
 esptool.py --chip esp32c5 --port PUERTO --baud 460800 \
@@ -78,7 +85,7 @@ Si necesitas flashear cada partición por separado:
 ```bash
 esptool.py --chip esp32c5 --port PUERTO --baud 460800 \
   write_flash --flash_mode dio --flash_freq 80m --flash_size 4MB \
-  0x0 esp32_marauder.ino.bootloader.bin \
+  0x2000 esp32_marauder.ino.bootloader.bin \
   0x8000 esp32_marauder.ino.partitions.bin \
   0x10000 esp32_marauder.ino.bin \
   0x310000 spiffs.bin
@@ -88,12 +95,14 @@ esptool.py --chip esp32c5 --port PUERTO --baud 460800 \
 
 ## 📲 Primer uso
 
-1. **Enciende el badge** — Verás el logo en la pantalla
-2. **Conéctate al WiFi:**
-   - **Red:** `PWNTERREY-XXXX`
+El badge no tiene pantalla: su única interfaz es el panel web.
+
+1. **Conecta el badge por USB-C** — arranca solo y levanta su propia red WiFi
+2. **Conéctate a esa red:**
+   - **Red:** `PWNTERREY-XXXX` (las X son únicas de cada badge)
    - **Contraseña:** `pwnterrey2026`
-3. **Abre el panel:** Navega a `http://192.168.4.1` en tu navegador
-4. **Explora:** Usa el menú para seleccionar ataques y herramientas
+3. **Abre el panel:** navega a `http://192.168.4.1`
+4. **Explora:** desde ahí lanzas los escaneos y ataques, y revisas resultados
 
 ---
 
@@ -102,7 +111,7 @@ esptool.py --chip esp32c5 --port PUERTO --baud 460800 \
 ### Requisitos
 
 - [arduino-cli](https://arduino.github.io/arduino-cli/)
-- Board: `esp32:esp32:esp32c5`
+- Core ESP32 **3.3.7 o superior** (el ESP32-C5 no existe en versiones anteriores)
 
 ### Pasos
 
@@ -115,17 +124,31 @@ git clone https://github.com/Wiinsad/pwnterrey-badge.git
 cd pwnterrey-badge
 
 # Compilar
-arduino-cli compile --fqbn esp32:esp32:esp32c5 src/esp32_marauder.ino
+arduino-cli compile \
+  --fqbn esp32:esp32:esp32c5:CDCOnBoot=cdc,FlashFreq=80,PSRAM=disabled,FlashSize=4M,FlashMode=dio,DebugLevel=none,PartitionScheme=huge_app \
+  src/esp32_marauder.ino
+```
 
+> **Las opciones del `--fqbn` no son opcionales.** La aplicación pesa ~1.8 MB y
+> no cabe en el esquema de particiones por omisión, por eso hace falta
+> `PartitionScheme=huge_app`. El badge tampoco lleva PSRAM, así que
+> `PSRAM=disabled` es obligatorio o el arranque falla.
+
+```bash
 # Flashear
-arduino-cli upload --fqbn esp32:esp32:esp32c5 --port /dev/ttyACM0 src/esp32_marauder.ino
+arduino-cli upload \
+  --fqbn esp32:esp32:esp32c5:CDCOnBoot=cdc,FlashFreq=80,PSRAM=disabled,FlashSize=4M,FlashMode=dio,DebugLevel=none,PartitionScheme=huge_app \
+  --port /dev/ttyACM0 src/esp32_marauder.ino
 ```
 
 ### Generar SPIFFS
 
+La partición SPIFFS de `huge_app` mide `0xE0000` (917504 bytes) y vive en
+`0x310000`:
+
 ```bash
 # Crear imagen SPIFFS con los archivos de data/
-mkspiffs -c data/ -b 4096 -p 256 -s 0x160000 spiffs.bin
+mkspiffs -c data/ -b 4096 -p 256 -s 0xE0000 spiffs.bin
 
 # Flashear SPIFFS
 esptool.py --chip esp32c5 --port /dev/ttyACM0 --baud 460800 \
@@ -144,7 +167,7 @@ pwnterrey-badge/
 │   ├── EvilPortal.cpp/h
 │   ├── CommandLine.cpp/h
 │   └── ...
-├── data/             # Archivos SPIFFS (portal web)
+├── data/             # Archivos SPIFFS (panel web)
 │   ├── portal.html
 │   ├── app.js
 │   └── ...
@@ -166,12 +189,11 @@ pwnterrey-badge/
 
 - Asegúrate de usar un cable **USB-C con datos** (no solo carga)
 - En Linux: `sudo dmesg | tail` para ver si el dispositivo aparece
-- Instala drivers CH340/CP2102 si es necesario
 
 ### Error "Failed to connect" al flashear
 
-- Mantén presionado el botón **BOOT** mientras conectas el USB
-- Suelta el botón después de que inicie la descarga
+- Mantén presionado **BOOT** mientras conectas el USB, y suéltalo cuando inicie
+  la descarga
 - Reduce la velocidad: cambia `460800` por `115200`
 
 ### El Web Flasher no muestra el botón
@@ -183,9 +205,9 @@ pwnterrey-badge/
 
 - Busca la red `PWNTERREY-XXXX` (las X son caracteres únicos del badge)
 - Contraseña: `pwnterrey2026`
-- Si no aparece, reinicia el badge
+- Si no aparece, desconecta y reconecta el USB
 
-### El portal web no carga
+### El panel web no carga
 
 - Verifica que el SPIFFS se flasheó correctamente
 - Intenta borrar la flash completa primero:
@@ -193,6 +215,13 @@ pwnterrey-badge/
   esptool.py --chip esp32c5 --port PUERTO erase_flash
   ```
   Y luego flashea de nuevo con `badge-full.bin`
+
+### El portal cautivo no abre solo en mi iPhone
+
+Si probaste versiones anteriores a la v2.3.8 con el mismo SSID, tu teléfono pudo
+guardar el veredicto de que esa red tiene internet y ya no muestra la hoja de
+login al reconectar. Usa **"Olvidar esta red"**, o lanza el Evil Twin con un
+SSID que ese teléfono nunca haya visto.
 
 ---
 
@@ -207,6 +236,15 @@ pwnterrey-badge/
 - 📱 [Instagram @pwnterrey](https://instagram.com/pwnterrey)
 - 💬 [Comunidad WhatsApp](https://chat.whatsapp.com/CnUJOXwgPs94dOgPqq2Rxd)
 - ⚡ [Web Flasher](https://wiinsad.github.io/pwnterrey-badge/)
+
+---
+
+## ⚖️ Uso responsable
+
+Este firmware incluye herramientas de ataque a redes inalámbricas. Úsalo
+únicamente sobre infraestructura propia o con autorización escrita del
+responsable. Operarlo contra redes de terceros sin permiso es ilegal en México y
+en la mayoría de los países.
 
 ---
 
