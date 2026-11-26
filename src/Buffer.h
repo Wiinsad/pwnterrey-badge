@@ -19,6 +19,12 @@ class Buffer {
   public:
     Buffer();
     ~Buffer();  // CRIT-1 fix: destructor to free allocated buffers
+    // CRIT-1 hardening: Buffer owns raw heap pointers (bufA/bufB) and has a destructor,
+    // so copying it shallow-copies those pointers and the copy's destructor frees them.
+    // Deleting copy construction and copy assignment turns any future
+    // `buffer_obj = Buffer();` into a compile error instead of a silent use-after-free.
+    Buffer(const Buffer&) = delete;
+    Buffer& operator=(const Buffer&) = delete;
     void pcapOpen(String file_name, fs::FS* fs, bool serial);
     void logOpen(String file_name, fs::FS* fs, bool serial);
     void append(wifi_promiscuous_pkt_t *packet, int len);

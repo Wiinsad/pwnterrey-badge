@@ -1,5 +1,5 @@
 
-var B='',pid=null,tpid=null,gpid=null,hsT=null,LS=null,aps=[],sel={},caps=[],selAp={ssid:'',ch:1},tpl='generic',snT='beacon',bk='apple';
+var B='',pid=null,tpid=null,gpid=null,hsT=null,spid=null,LS=null,aps=[],sel={},caps=[],selAp={ssid:'',ch:1},tpl='generic',snT='beacon',bk='apple';
 var ATKS=[
 {t:'deauth',n:'Deauth',d:'Desconecta clientes de redes seleccionadas',ns:true,ic:'<path d="M1 9l2 2c4.97-4.97 13.03-4.97 18 0l2-2C16.93 2.93 7.08 2.93 1 9z"/><path d="M8 12l2 2c1.66-1.66 4.34-1.66 6 0l2-2c-2.76-2.76-7.24-2.76-10 0z"/><line x1="4" y1="20" x2="20" y2="4" stroke-width="2"/>'},
 {t:'beacon-random',n:'Beacon Spam',d:'Genera redes falsas al azar',ns:false,ic:'<path d="M5 12.55a11 11 0 0114 0"/><path d="M8.53 16.11a6 6 0 016.95 0"/><circle cx="12" cy="20" r="1"/><path d="M2 5l4 4M22 5l-4 4"/>'},
@@ -32,7 +32,9 @@ var NAV_MAP={home:'nb-home',wifi:'nb-wifi',attack:'nb-attack',monitor:'nb-mon',b
 function go(p,b){document.querySelectorAll('.pg').forEach(function(e){e.classList.remove('on')});document.getElementById('p-'+p).classList.add('on');document.querySelectorAll('.nb').forEach(function(x){x.classList.remove('on')});var nbid=NAV_MAP[p];if(nbid)document.getElementById(nbid).classList.add('on');window.scrollTo(0,0);
 if(gpid){clearInterval(gpid);gpid=null}
 if(p!=='attack'&&hsT){clearInterval(hsT);hsT=null}
+if(p!=='wifi'&&spid){clearInterval(spid);spid=null}
 if(p!=='wifi'&&p!=='monitor')monLeave();
+if(p==='wifi'){if(aps.length)rAL();else fAps()}
 if(p==='gps'){fGps();gpid=setInterval(fGps,3000)}
 if(p==='map'){wdPollData();wdPollGps();wdDraw()}
 if(p==='settings'){fSettings();fSsids();fSpiffs()}
@@ -56,10 +58,10 @@ var job=d.job||{};
 var jk=job.kind||d.mgmt_state||'idle';
 var s=jk;
 var pc='p-ok',dc='d-g',tx='Inactivo';
-if(s==='scan'||s==='scanning'){pc='p-scan';dc='d-c';tx='Escaneando'}
-else if(s==='attack'||s==='eviltwin'){pc='p-atk';dc='d-r';tx='Atacando'}
-else if(s==='capture'||s==='handshake'||s==='sniffer'||s==='monitor'){pc='p-cap';dc='d-a';tx='Capturando'}
-else if(s==='wardrive'||s==='ble'){pc='p-scan';dc='d-c';tx=s==='ble'?'BLE':'Wardrive'}
+if(/^scan/.test(s)){pc='p-scan';dc='d-c';tx='Escaneando'}
+else if(/^attack|^eviltwin/.test(s)){pc='p-atk';dc='d-r';tx='Atacando'}
+else if(/^capture|^handshake|^sniff|^monitor/.test(s)){pc='p-cap';dc='d-a';tx='Capturando'}
+else if(/^wardrive|^ble/.test(s)){pc='p-scan';dc='d-c';tx=/^ble/.test(s)?'BLE':'Wardrive'}
 var hsEl=document.getElementById('hs');
 if(s&&s!=='idle'){hsEl.style.display='';hsEl.innerHTML='<span class="pill '+pc+'"><span class="dot '+dc+'"></span>'+tx+'</span>'}
 else{hsEl.style.display='none'}
@@ -67,7 +69,8 @@ else{hsEl.style.display='none'}
 var jobActive=(jk!=='idle'&&jk!=='');
 var jbr=document.getElementById('jobbar');
 if(jobActive){jbr.style.display='flex';var elapsed=job.elapsed!=null?job.elapsed+'s ':'';
-document.getElementById('jbtext').textContent=(job.type?job.type+' ':'')+jk+'   '+elapsed+(job.remaining!=null?job.remaining+'s restantes':'activo');}
+var kindLabel=/^scan/.test(jk)?'Escaneando':/^attack/.test(jk)?'Ataque':/^eviltwin/.test(jk)?'Evil Twin':/^sniff/.test(jk)?'Sniffer':/^ble/.test(jk)?'BLE':/^wardrive/.test(jk)?'Wardrive':jk;
+document.getElementById('jbtext').textContent=(job.type?job.type+' ':'')+kindLabel+'   '+elapsed+(job.remaining!=null?job.remaining+'s restantes':'activo');}
 else jbr.style.display='none';
 
 document.querySelectorAll('.b.bp,.b.bd').forEach(function(b){if(b.id==='jbstop'||b.id==='bscan'||b.closest('#aab')||b.closest('#p-nfc')||b.closest('#p-gps')||b.closest('#p-term')||b.closest('#p-settings')||b.closest('#p-evil')||b.closest('#p-map'))return;b.disabled=jobActive&&!b.dataset.alwaysEnabled;});
@@ -89,26 +92,32 @@ var ab=document.getElementById('aab');
 if(jobActive&&(s==='attack'||s==='eviltwin'||s==='sniffer'||s==='monitor')){ab.style.display='flex';document.getElementById('aabn').textContent=job.kind||dt.kind||dt.type||'Ataque';document.getElementById('aabt').textContent=job.remaining!=null?job.remaining+'s restantes':'Indefinido - detener manualmente'}
 else ab.style.display='none'}
 
-function qScan(){go('wifi',document.querySelectorAll('.nb')[1]);doScan()}
-function qHs(){go('attack',document.querySelectorAll('.nb')[2]);doHs()}
+function qScan(){go('wifi');doScan()}
+function qHs(){go('attack');doHs()}
 
 function doScan(){
 var b=document.getElementById('bscan');b.disabled=true;
+var dEl=document.getElementById('sdur');
+var dur=dEl?(parseInt(dEl.value,10)||10):10;
 document.getElementById('ss').textContent='Escaneando... ⟳';
 document.getElementById('cveout').style.display='none';
-ap('/api/scan',{}).then(function(r){
+ap('/api/scan',{duration:dur}).then(function(r){
 
-if(!r||!r.ok){b.disabled=false;toast('Error en escaneo');document.getElementById('ss').textContent='';return}
+if(!r||!r.ok){b.disabled=false;toast(r&&r.output?r.output:'Error en escaneo');document.getElementById('ss').textContent='';return}
 if(r.state==='scanning'||r.scanning){
 
-var scanFails=0;var scanPoll=setInterval(function(){
+var scanFails=0;if(spid)clearInterval(spid);spid=setInterval(function(){
 api('/api/state').then(function(d){
-if(!d){scanFails++;if(scanFails>20){clearInterval(scanPoll);b.disabled=false;document.getElementById('ss').textContent='Reconectando...';fAps()}return}
+if(!d){scanFails++;if(scanFails>20){clearInterval(spid);spid=null;b.disabled=false;document.getElementById('ss').textContent='Reconectando...';fAps()}return}
 scanFails=0;var jk=(d.job&&d.job.kind)||d.mgmt_state||'idle';
-if(jk!=='scan'&&jk!=='scanning'){
-clearInterval(scanPoll);b.disabled=false;
+if(!/scan/.test(jk)){
+clearInterval(spid);spid=null;b.disabled=false;
 document.getElementById('ss').textContent='Cargando resultados...';
 fAps();
+}else{
+var sEl=(d.job&&d.job.elapsed)||0,sHk=d.heap?Math.round(d.heap/1024):0;
+var sRm=(d.job&&d.job.remaining!=null)?d.job.remaining:null;
+document.getElementById('ss').textContent='Escaneando... '+(sRm!=null?sRm+'s restantes':sEl+'s')+' · heap '+sHk+'KB ⟳';
 }
 });},1500);
 }else{
@@ -116,11 +125,13 @@ b.disabled=false;
 toast((r.count||0)+' redes encontradas');fAps();
 }
 })}
+function restoreAps(){try{var c=JSON.parse(localStorage.getItem('wifiAps')||'null');if(!c||!c.aps||!c.aps.length)return;aps=c.aps;sel={};aps.forEach(function(a){if(a.sel)sel[a.i]=true});var mins=Math.round((Date.now()-c.t)/60000);document.getElementById('ss').textContent=aps.length+' redes (caché '+(mins<1?'reciente':mins+' min')+')';rAL();hsRenderTargets()}catch(e){}}
 function fAps(retry){retry=retry||0;api('/api/aps').then(function(d){
 if(!d){if(retry<8){var ms=Math.min(500*Math.pow(1.5,retry),4000);document.getElementById('ss').textContent='Reconectando... ('+Math.round(ms/1000)+'s)';setTimeout(function(){fAps(retry+1)},ms);return}document.getElementById('ss').textContent='Sin respuesta';return}
 if(d.scanning){document.getElementById('ss').textContent='Escaneando... '+(d.count||0)+' redes hasta ahora ⟳';setTimeout(function(){fAps(0)},1000);return;}
 if(!d.aps||!d.aps.length){document.getElementById('ss').textContent='Sin resultados';document.getElementById('al').innerHTML='<div class="le">Sin redes detectadas</div>';return}
 aps=d.aps;sel={};
+try{localStorage.setItem('wifiAps',JSON.stringify({t:Date.now(),aps:aps}))}catch(e){}
 aps.forEach(function(a){if(a.sel)sel[a.i]=true});
 document.getElementById('ss').textContent=aps.length+' redes encontradas';rAL();hsRenderTargets()})}
 function rAL(){var e=document.getElementById('al');
@@ -320,10 +331,10 @@ nMsg(r&&r.ok?'<span style="color:var(--ok)">Escrito correctamente</span>':'<span
 function gpsRestart(){
   var btn=document.querySelector('#p-gps button[onclick]');if(!btn)return;
   btn.textContent='Reiniciando...';btn.disabled=true;btn.style.opacity='0.5';
-  toast('Reiniciando GPS...');
+  toast('Reiniciando GPS... (~8s)');
   fetch('/api/gps',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
     btn.textContent='↻ Reiniciar GPS';btn.disabled=false;btn.style.opacity='1';
-    toast(d.ok?'GPS reiniciado — espera ~30s para señal':'Error: '+(d.code||''))
+    toast(d.ok?'GPS reiniciado — espera ~30s para señal':(d.output||'Error: '+(d.code||'')))
   }).catch(function(){btn.textContent='↻ Reiniciar GPS';btn.disabled=false;btn.style.opacity='1';toast('Error al reiniciar GPS')})
 }
 function gpsSignalBars(sats){
@@ -375,7 +386,7 @@ function wdCacheClear(){if(!_wdDB)return;if(!confirm('¿Limpiar todos los datos 
 tx.objectStore('nets').clear();tx.oncomplete=function(){_wdAllData=[];wdData=[];wdDraw();wdListRender();toast('Cache limpiado')}}
 
 
-if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw-tiles.js').catch(function(){})}
+if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw-tiles.js').then(function(r){r.update()}).catch(function(){})}
 
 function wdAuthColor(a){if(!a)return'#888';var u=String(a).toUpperCase();if(u.indexOf('OPEN')>=0)return'#ff4444';if(u.indexOf('WEP')>=0)return'#ff8800';if(u.indexOf('WPA3')>=0)return'#00ddff';if(u.indexOf('WPA2')>=0)return'#44ff44';if(u.indexOf('WPA')>=0)return'#ffdd00';return'#888'}
 
@@ -438,7 +449,7 @@ function wdStart(t){
       if(wdAutoT)clearInterval(wdAutoT);
       wdAutoT=setInterval(function(){wdPollData();wdPollGps()},3000);
       wdPollData();wdPollGps();
-    }else toast('Error wardrive');
+    }else toast((r&&r.output)?r.output:'Error wardrive');
   }).catch(function(){toast('Error wardrive')})}
 
 function wdStop(){
@@ -485,10 +496,11 @@ function _loadTile(url,cb){
   if(_tImgCache[url]){cb(_tImgCache[url]);return}
   _tGet(url,function(blob){
     if(blob){var u=URL.createObjectURL(blob);var img=new Image();img.onload=function(){_tImgCache[url]=img;cb(img)};img.onerror=function(){cb(null)};img.src=u;return}
-    if(!navigator.onLine){cb(null);return}
-    fetch(url,{mode:'cors'}).then(function(r){return r.ok?r.blob():null}).then(function(b){
+    // Always try fetch — phone may have mobile data even on badge AP WiFi
+    var ctrl=new AbortController();var tid=setTimeout(function(){ctrl.abort()},4000);
+    fetch(url,{mode:'cors',signal:ctrl.signal}).then(function(r){clearTimeout(tid);return r.ok?r.blob():null}).then(function(b){
       if(!b){cb(null);return}_tPut(url,b);var u=URL.createObjectURL(b);var img=new Image();img.onload=function(){_tImgCache[url]=img;cb(img)};img.onerror=function(){cb(null)};img.src=u;
-    }).catch(function(){cb(null)})
+    }).catch(function(){clearTimeout(tid);cb(null)})
   })
 }
 

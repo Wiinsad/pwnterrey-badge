@@ -650,6 +650,31 @@ bool WiFiScan::scanning() {
 
 // Function to prepare to run a specific scan
 void WiFiScan::StartScan(uint8_t scan_mode, uint16_t color) {
+  // CRITICAL (ESP32-C5 ROM constraint): promiscuous mode must be OFF before
+  // anything reconfigures the AP/STA interface, or the ROM raises a Load access
+  // fault. The same constraint is documented in WpsAttack.cpp:255.
+  //
+  // Every state transition funnels through here, and both directions used to
+  // violate it:
+  //   stopping - CommandLine's "stopscan" calls StartScan(WIFI_SCAN_OFF), which
+  //     overwrites currentScanMode before dispatching to StopScan(). StopScan()
+  //     branches on currentScanMode, so by then it always reads WIFI_SCAN_OFF,
+  //     matches none of its ~40 cases, and shutdownWiFi() never runs. The whole
+  //     teardown body is unreachable, so the sniffer callback stayed registered
+  //     and promiscuous stayed on. EvilPortal then entered MGMT_JOB_REARM and
+  //     called rearmManagementAP() 500ms later, reconfiguring the interface with
+  //     promiscuous still active - an instant ROM fault. That is the "stop a
+  //     wardrive and the badge dies until reset" crash.
+  //   starting - initWiFi() calls rearmManagementAP() for any non-OFF mode, so
+  //     starting scan B while scan A was still promiscuous hit the same fault.
+  //
+  // Clearing it here is safe: every Run* mode that needs promiscuous re-enables
+  // it and re-registers its own rx callback immediately afterwards. Calling this
+  // before esp_wifi_init() simply returns ESP_ERR_WIFI_NOT_INIT, which we ignore.
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(NULL);
+  delay(100);  // settle time required by the C5 ROM before reconfiguration
+
   this->currentScanMode = scan_mode;
 #ifndef MARAUDER_FLIPPER_C5
   Serial.print("Starting Scan Mode: ");
@@ -1375,6 +1400,10 @@ void WiFiScan::RunLoadAPList() {
     ap.selected = false;
     parseBSSID(obj["bssid"], ap.bssid);
     ap.stations = new LinkedList<uint8_t>();
+    // F-12 fix: AccessPoint is a plain struct with no constructor, so beacon held stack
+    // garbage here. clearAPs() does `if (ap.beacon != nullptr) delete ap.beacon;`, which
+    // passed that garbage pointer to delete -> wild free and heap corruption.
+    ap.beacon = nullptr;
     access_points->add(ap);
   }
 
@@ -2382,17 +2411,46 @@ void WiFiScan::executeSwiftpairSpam(EBLEPayloadType type) {
 }
 
 void WiFiScan::setBaseMacAddress(uint8_t macAddr[6]) {
-  // Use ESP-IDF function to set the base MAC address
-  esp_err_t err = esp_base_mac_addr_set(macAddr);
-
-  // Check for success or handle errors
-  if (err == ESP_OK) {
+#ifdef HAS_BT
+  if (pAdvertising == nullptr)
     return;
-  } else if (err == ESP_ERR_INVALID_ARG) {
-    Serial.println("Error: Invalid MAC address argument.");
-  } else {
-    Serial.printf("Error: Failed to set MAC address. Code: %d\n", err);
-  }
+
+  // Why this changed: the NimBLE advertiser transmits using the controller's
+  // OWN address, which is fixed when the BLE stack initializes.
+  // esp_base_mac_addr_set() only affects addresses DERIVED at interface init,
+  // so calling it on an already-running advertiser never changed the
+  // transmitted MAC. Every spam packet went out with the SAME address and
+  // iOS/Android deduplicated them, showing only ~1 popup no matter how long it
+  // ran. We now set a fresh random *static* address at the BLE link layer on
+  // every cycle so each payload looks like a brand-new nearby device.
+  //
+  // ble_hs_id_set_rnd() (reached via setOwnAddr) requires a valid static-random
+  // address: the two most-significant bits of the most-significant byte (val[5]
+  // in NimBLE's little-endian order) must be 0b11, and the random part must not
+  // be all zeros or all ones.
+  macAddr[5] = (macAddr[5] & 0x3F) | 0xC0;
+  if ((macAddr[0] | macAddr[1] | macAddr[2] | macAddr[3] | macAddr[4] |
+       (macAddr[5] & 0x3F)) == 0x00)
+    macAddr[0] = 0x01; // avoid the all-zero random-part edge case
+
+  // The HCI "LE Set Random Address" command is rejected while advertising is
+  // active, so make sure the advertiser is stopped before changing the address.
+  pAdvertising->stop();
+
+  // Fast advertising window: the default controller interval is ~1.28 s, far
+  // too slow for the 100 ms dwell the spam loop uses (the MAC would rotate
+  // before a single packet went out). 20-30 ms lets each short-lived address
+  // transmit several times before the next rotation.
+  pAdvertising->setMinInterval(0x20); // 32 * 0.625 ms = 20 ms
+  pAdvertising->setMaxInterval(0x30); // 48 * 0.625 ms = 30 ms
+
+  if (NimBLEDevice::setOwnAddr(macAddr))
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+  else
+    Serial.println("[BLE] setOwnAddr failed — MAC not rotated this cycle");
+#else
+  (void)macAddr;
+#endif
 }
 
 void WiFiScan::executeSpoofAirtag() {

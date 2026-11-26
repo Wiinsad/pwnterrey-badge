@@ -111,6 +111,13 @@ class EvilPortal {
     String   mgmt_job_kind;            // e.g. "scan-ap", "attack-rickroll"
     uint32_t mgmt_job_t0 = 0;          // millis() when the job/state began
     uint32_t mgmt_job_duration_s = 0;  // 0 = indefinite (stop via /api/stop or reboot)
+    bool     mgmt_scan_retried = false; // guards the single auto-retry when a scan returns 0/-2
+    // Cross-cycle BSSID dedup for multi-cycle (timed) scans. Flat table on
+    // purpose: LinkedList::get() returns AccessPoint BY VALUE, which copies
+    // its String essid and churns the heap on every comparison — exactly what
+    // must not happen while the WiFi driver is scanning.
+    uint8_t  mgmt_scan_seen[64][6];
+    uint8_t  mgmt_scan_seen_n = 0;
     String   mgmt_ssid;                // management AP SSID, kept for re-arm
     void   mgmtServiceJob();           // advance the state machine each loop
     String mgmtJobStateName();
@@ -124,27 +131,12 @@ class EvilPortal {
       bool has_pmkid;
       int8_t rssi;
       uint8_t ch;
-      uint32_t last_deauth_ms; // rate-limit deauths (1 per 5s per entry)
     };
     #define MAX_HS_ENTRIES 32
     static hs_entry_t hs_list[MAX_HS_ENTRIES];
     static uint8_t hs_count;
     static bool hs_active;
     static bool hs_deauth;
-    static uint8_t hs_target_bssid[6];  // zero = passive (all), set = targeted
-    static uint8_t hs_target_ch;        // 0 = hop all scanned channels
-    static uint8_t hs_hop_channels[14]; // unique channels from last scan
-    static uint8_t hs_hop_count;        // number of channels to hop
-    static volatile uint32_t hs_pkt_count;  // total DATA packets seen by callback
-    static volatile uint32_t hs_eapol_count; // EAPOL packets detected
-    static volatile uint32_t hs_beacon_count; // beacon frames
-    static volatile uint32_t hs_data_count;   // data frames (non-beacon)
-    static volatile uint32_t hs_short_count;  // frames dropped by len<36
-    // Debug: store first 48 bytes of up to 3 data frames + any frame containing 0x888e anywhere
-    static uint8_t hs_dbg_frames[4][48];
-    static uint8_t hs_dbg_lens[4];
-    static volatile uint8_t hs_dbg_count;
-    static volatile bool hs_dbg_eapol_found;
     static void hsSnifferCallback(void* buf, wifi_promiscuous_pkt_type_t type);
     static int hsFindOrAdd(const uint8_t* bssid);
 
@@ -202,14 +194,42 @@ class EvilPortal {
     }
 
     static String webOutDrain() {
-      // CRIT-5 fix: use portMUX spinlock for atomic read-modify-write
-      portENTER_CRITICAL(&_webOutLock);
-      String result = "";
-      while (_webOutTail != _webOutHead) {
-        result += _webOutBuf[_webOutTail];
-        _webOutTail = (_webOutTail + 1) % WEB_OUTPUT_BUF_SIZE;
+      // F-13 fix: the previous version built the String one char at a time INSIDE the
+      // critical section, so draining a full 4KB buffer performed thousands of heap
+      // operations with interrupts disabled — and on ESP-IDF the allocator takes its own
+      // lock, so that risks far worse than latency. Now the allocation happens outside
+      // the lock and only two memcpy() calls run inside it.
+      uint16_t h = _webOutHead, t = _webOutTail;
+      if (h == t) return String("");
+      uint16_t count = (h >= t) ? (uint16_t)(h - t)
+                                : (uint16_t)(WEB_OUTPUT_BUF_SIZE - t + h);
+      char* tmp = (char*)malloc((size_t)count + 1);
+      if (tmp == nullptr) {
+        // Out of memory: drop the buffered output rather than stall or corrupt state.
+        portENTER_CRITICAL(&_webOutLock);
+        _webOutTail = _webOutHead;
+        portEXIT_CRITICAL(&_webOutLock);
+        return String("");
       }
+      portENTER_CRITICAL(&_webOutLock);
+      // Re-read under the lock: the writer task may have advanced head since the snapshot.
+      t = _webOutTail;
+      h = _webOutHead;
+      uint16_t n = (h >= t) ? (uint16_t)(h - t)
+                            : (uint16_t)(WEB_OUTPUT_BUF_SIZE - t + h);
+      if (n > count) n = count;  // never write past the allocation; the rest drains next call
+      if ((uint32_t)t + n <= WEB_OUTPUT_BUF_SIZE) {
+        memcpy(tmp, _webOutBuf + t, n);
+      } else {
+        uint16_t first = (uint16_t)(WEB_OUTPUT_BUF_SIZE - t);
+        memcpy(tmp, _webOutBuf + t, first);
+        memcpy(tmp + first, _webOutBuf, (size_t)(n - first));
+      }
+      _webOutTail = (uint16_t)(((uint32_t)t + n) % WEB_OUTPUT_BUF_SIZE);
       portEXIT_CRITICAL(&_webOutLock);
+      tmp[n] = '\0';
+      String result(tmp);
+      free(tmp);
       return result;
     }
 

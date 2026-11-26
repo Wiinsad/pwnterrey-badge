@@ -279,7 +279,15 @@ void setup()
   //  display_obj.tft.println(F(text_table0[2]));
   //#endif
 
-  buffer_obj = Buffer();
+  // CRIT-1 fix: `buffer_obj = Buffer();` was removed here.
+  // buffer_obj is a global (line 87), so its constructor has already allocated bufA/bufB.
+  // Buffer holds raw uint8_t* members and declares ~Buffer() but no copy-assignment
+  // operator, so that reassignment was a Rule of Three violation: the temporary's
+  // shallow member-wise copy leaked the original 6KB, then the temporary's destructor
+  // freed the very buffers buffer_obj had just been pointed at. buffer_obj was left
+  // holding dangling pointers, and Buffer::append() is gated only by SavePCAP (default
+  // true), so every wardrive line and every sniffer packet wrote into freed heap from a
+  // WiFi callback. The global constructor is sufficient; no reassignment is needed.
   #if defined(HAS_SD)
     // Do some SD stuff
     if(sd_obj.initSD()) {

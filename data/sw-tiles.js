@@ -1,7 +1,7 @@
-var CACHE='pwnterrey-tiles-v1';
+var CACHE='pwnterrey-tiles-v2';
 self.addEventListener('fetch',function(ev){
   var u=ev.request.url;
-  if(u.indexOf('.tile.openstreetmap.org')<0)return;
+  if(u.indexOf('tile.openstreetmap.org')<0)return;
   ev.respondWith(
     caches.open(CACHE).then(function(cache){
       return cache.match(ev.request).then(function(cached){
