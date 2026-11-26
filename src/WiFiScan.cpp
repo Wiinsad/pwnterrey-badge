@@ -2373,14 +2373,16 @@ void WiFiScan::executeSourApple() {
 
   pAdvertising->start();
   yield();
-  // Dwell just long enough for a few packets to go out at the 20-30 ms interval
-  // setBaseMacAddress() configures, then let the NEXT cycle stop the advertiser.
-  // The trailing stop() that used to be here was redundant - setBaseMacAddress()
-  // already stops advertising before rotating the address, because the HCI "LE
-  // Set Random Address" command is rejected while advertising - and it created
-  // dead air between consecutive spam cycles, so one payload's advertising can
-  // now overlap the next one's setup instead of the radio going quiet in between.
-  vTaskDelay(pdMS_TO_TICKS(50));
+  // 100 ms, restored after a 50 ms experiment made this measurably WORSE (the
+  // target went from occasional notifications to none at all). At the 20-30 ms
+  // advertising interval set in setBaseMacAddress(), 50 ms only puts ~2 packets
+  // of each identity on the air, and a phone needs to actually receive several
+  // before it will surface a notification. Rotating identities faster is
+  // pointless if no single identity is broadcast long enough to be seen, so
+  // dwell time wins over rotation rate here. Do not shorten this again without
+  // on-device evidence that notifications went UP.
+  vTaskDelay(pdMS_TO_TICKS(100));
+  pAdvertising->stop();
   yield();
 #endif
 }
@@ -2429,10 +2431,11 @@ void WiFiScan::executeSwiftpairSpam(EBLEPayloadType type) {
 
   pAdvertising->start();
   yield();
-  // See executeSourApple(): the trailing stop() was redundant, because
-  // setBaseMacAddress() already stops the advertiser before rotating the MAC,
-  // and it created dead air between consecutive spam cycles.
-  vTaskDelay(pdMS_TO_TICKS(50));
+  // 100 ms, restored for the reason documented in executeSourApple(): shortening
+  // this to 50 ms cut notifications to zero on a real phone, because each
+  // identity needs enough airtime to actually be received, not just advertised.
+  vTaskDelay(pdMS_TO_TICKS(100));
+  pAdvertising->stop();
   yield();
 #endif
 }

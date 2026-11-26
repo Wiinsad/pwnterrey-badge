@@ -2204,8 +2204,18 @@ void EvilPortal::setupManagementServer() {
   // Body: {ssid, channel, template:'generic'|'wifi'|'corp'|'custom', duration:s}
   server.on("/api/eviltwin", HTTP_POST, [this]() {
     String ssid_et = mgmtBodyStr("ssid");
-    int ch = (int)mgmtBodyLong("channel", 1);
-    if (!((ch >= 1 && ch <= 14) || (ch >= 36 && ch <= 177))) ch = 1; // validate 2.4/5GHz channel
+    int ch_req = (int)mgmtBodyLong("channel", 1);
+    int ch = ch_req;
+    // Clamp the clone to 2.4 GHz. The panel prefills this field from whichever
+    // AP was last selected in the scan list and does NOT clear it when the SSID
+    // is typed over by hand, so a stale 5 GHz channel used to ride along and the
+    // evil AP came up on, say, channel 149 - a band the operator's phone was not
+    // even scanning. softAP() succeeded, the panel truthfully reported READY,
+    // and the network was simply invisible where anyone was looking for it.
+    // Cloning onto 2.4 GHz is also the better attack: the SSID is what the
+    // victim matches on, 2.4 GHz carries further, and this board's 5 GHz AP
+    // support is region-gated and unverified here.
+    if (ch < 1 || ch > 13) ch = 1;
     String tpl = mgmtBodyStr("template");
     if (tpl == "") tpl = "generic";
     // G: Bug G — duration support: 0=until reset, default 300s
@@ -2280,6 +2290,8 @@ void EvilPortal::setupManagementServer() {
     this->has_html = true;
 
     Serial.println("[MGMT] Starting Evil Twin: " + ssid_et + " ch" + String(ch) +
+                   (ch_req != ch ? (" (requested ch" + String(ch_req) +
+                                    ", clamped to 2.4GHz)") : String("")) +
                    " tpl=" + tpl + " dur=" + String(dur) + "s");
 
     // Tear down management
@@ -2343,6 +2355,25 @@ void EvilPortal::setupManagementServer() {
       Serial.printf("[MGMT] Evil Twin AP up ip=%s dhcps=%s\n",
                     WiFi.softAPIP().toString().c_str(),
                     et_st == ESP_NETIF_DHCP_STARTED ? "on" : "OFF");
+    }
+
+    // Read the beacon configuration back from the driver instead of trusting the
+    // values we asked for. softAP() can succeed while the radio ends up on a
+    // different channel or authmode than requested (region rules, band
+    // switching), and that difference is invisible from the HTTP response - it
+    // is exactly what made "READY but no network anywhere" impossible to
+    // diagnose. authmode is the raw esp_wifi value: 0=OPEN, 1=WEP, 3=WPA2_PSK.
+    wifi_config_t et_actual;
+    if (esp_wifi_get_config(WIFI_IF_AP, &et_actual) == ESP_OK) {
+      Serial.printf("[MGMT] Evil Twin beacon: ssid=\"%s\" ch=%d authmode=%d hidden=%d\n",
+                    (const char *)et_actual.ap.ssid, (int)et_actual.ap.channel,
+                    (int)et_actual.ap.authmode, (int)et_actual.ap.ssid_hidden);
+      if ((int)et_actual.ap.channel != ch) {
+        Serial.printf("[MGMT] WARNING: asked for ch%d, radio is on ch%d\n",
+                      ch, (int)et_actual.ap.channel);
+      }
+    } else {
+      Serial.println("[MGMT] WARNING: could not read back AP config");
     }
 
     Serial.println("[MGMT] Evil Twin AP: " + String(apName) + " IP: " + WiFi.softAPIP().toString());
@@ -2678,7 +2709,28 @@ bool EvilPortal::rearmManagementAP() {
   if (this->mgmt_ssid.length() == 0)
     return false;
   WiFi.mode(WIFI_AP_STA); // Bug2: preserve STA interface for scanNetworks()
-  bool ok = WiFi.softAP(this->mgmt_ssid.c_str(), MGMT_AP_PASS, 1); // WPA2 ch1
+
+  // Returning from an evil twin means the AP interface was last configured as an
+  // OPEN network on a channel we did not choose. Rebuilding a WPA2 AP directly
+  // on top of that left the beacon half-converted: clients saw the privacy bit
+  // set with no usable RSN element, reported the network as WEP, and then
+  // refused to associate - the management AP looked present but unjoinable.
+  // Clearing the interface first makes the transition deterministic. The boot
+  // path deliberately does NOT take this branch, because the plain sequence
+  // below is the one proven to work on this board and must not change.
+  if (this->mgmt_job_kind == "eviltwin") {
+    Serial.println("[MGMT] clean AP reset before rearm (returning from evil twin)");
+    WiFi.softAPdisconnect(true);
+    delay(300);
+    WiFi.mode(WIFI_AP_STA);
+    delay(200);
+  }
+
+  // auth_mode and cipher are passed explicitly instead of relying on the core's
+  // defaults, so the management AP's advertised security can never depend on
+  // what a previous attack left behind in the driver.
+  bool ok = WiFi.softAP(this->mgmt_ssid.c_str(), MGMT_AP_PASS, 1, 0, 4, false,
+                        WIFI_AUTH_WPA2_PSK, WIFI_CIPHER_TYPE_CCMP); // WPA2 ch1
   #ifdef MARAUDER_FLIPPER_C5
     WiFi.setTxPower(WIFI_POWER_8_5dBm);
   #endif
@@ -2702,6 +2754,18 @@ bool EvilPortal::rearmManagementAP() {
                   st == ESP_NETIF_DHCP_STARTED ? "on" : "OFF");
   } else {
     Serial.println("[MGMT] WARNING: AP netif handle not found");
+  }
+  // Confirm what the radio is actually advertising. If the management AP ever
+  // comes back unjoinable again, this line says why in one glance instead of
+  // requiring another flash to find out: authmode 3 is WPA2_PSK (correct),
+  // 1 is WEP and 0 is OPEN, either of which breaks a saved WPA2 profile on
+  // every client that had joined before.
+  wifi_config_t mgmt_actual;
+  if (esp_wifi_get_config(WIFI_IF_AP, &mgmt_actual) == ESP_OK) {
+    Serial.printf("[MGMT] AP beacon: ssid=\"%s\" ch=%d authmode=%d%s\n",
+                  (const char *)mgmt_actual.ap.ssid, (int)mgmt_actual.ap.channel,
+                  (int)mgmt_actual.ap.authmode,
+                  mgmt_actual.ap.authmode == WIFI_AUTH_WPA2_PSK ? "" : "  <-- WRONG, expected 3");
   }
   return true;
 }

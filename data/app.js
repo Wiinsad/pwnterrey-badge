@@ -39,7 +39,17 @@ if(p==='gps'){fGps();gpid=setInterval(fGps,3000)}
 if(p==='map'){wdPollData();wdPollGps();wdDraw()}
 if(p==='settings'){fSettings();fSsids();fSpiffs()}
 if(p==='nfc')fNfc();
-if(p==='attack'){fHs();if(selAp.ssid){document.getElementById('essid').value=selAp.ssid;document.getElementById('ech').value=selAp.ch}fTplSt();fCap()}}
+if(p==='attack'){fHs();
+var ei=document.getElementById('essid'),ec=document.getElementById('ech');
+if(selAp.ssid){ei.value=selAp.ssid;ec.value=(selAp.ch>=1&&selAp.ch<=13)?selAp.ch:1}
+// Typing a different SSID used to leave the previously selected AP's channel in
+// the field, so the clone was raised on that old AP's channel instead of one
+// suited to the typed target. When the leftover was a 5 GHz channel the evil
+// network came up in a band the operator's phone was not scanning: the badge
+// reported READY and the network was simply invisible. Reset to channel 1 as
+// soon as the SSID stops matching whatever was selected.
+if(ei&&!ei._chGuard){ei._chGuard=1;ei.addEventListener('input',function(){if(!selAp.ssid||ei.value.trim()!==selAp.ssid)ec.value=1})}
+fTplSt();fCap()}}
 
 var _pollBusy=false,_pollBackoff=0,_pollOffline=false;
 function _setOnline(v){if(_pollOffline===!v)return;_pollOffline=!v;document.getElementById('connbar').style.display=v?'none':'flex';}
@@ -453,15 +463,22 @@ function wdStart(t){
   }).catch(function(){toast('Error wardrive')})}
 
 function wdStop(){
-
+  // Immediate visual feedback. A wardrive scan is synchronous on the badge, so
+  // /api/stop can take several seconds to answer, and the old code only showed
+  // a toast once the response arrived. Nothing changed on click, which made a
+  // button that had in fact already been accepted look completely dead.
+  var b=document.getElementById('wdstopbtn');
+  if(b){if(b.disabled)return;b.disabled=true;b._txt=b.textContent;b.textContent='Deteniendo...'}
+  var rest=function(){if(b){b.disabled=false;b.textContent=b._txt||'Detener'}};
   if(wdAutoT){clearInterval(wdAutoT);wdAutoT=null}
   fetch('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(function(r){return r.json()}).then(function(r){
+    rest();
     toast('Wardrive detenido');
     wdIsActive=false;
     wdSyncUI();
     wdPollData();
   }).catch(function(){
-
+    rest();
     toast('Wardrive detenido');
     wdIsActive=false;
     wdSyncUI();
