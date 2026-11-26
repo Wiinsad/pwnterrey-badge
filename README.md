@@ -232,6 +232,7 @@ SSID que ese teléfono nunca haya visto.
 
 - **[Electronic Cats](https://github.com/ElectronicCats)** — Diseño de hardware
 - **Pwnterrey Team** — Personalización del firmware y diseño del badge
+- **RF Village** — Colaboración en el desarrollo del badge
 - **[justcallmekoko](https://github.com/justcallmekoko)** — Creador de [ESP32 Marauder](https://github.com/justcallmekoko/ESP32Marauder)
 
 ### 🔗 Enlaces
