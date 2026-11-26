@@ -28,9 +28,12 @@
 - 📻 **Monitor de señal** — Gráfica de actividad por canal
 - 🌐 **Panel web** — Control completo desde `http://192.168.4.1`
 
-> **El badge no tiene pantalla ni botones.** Todo se opera desde el panel web.
-> Tampoco lleva ranura SD ni batería: se alimenta por USB-C y las credenciales
-> capturadas se guardan en la memoria flash interna (SPIFFS).
+> **Todo se opera desde el panel web** en `http://192.168.4.1`, y los resultados
+> se guardan en la memoria flash interna del badge. Descarga el concentrado de
+> tus pruebas desde el panel cuando termines: el archivo de capturas tiene un
+> tope de 8 KB y, al llenarse, **las capturas nuevas se descartan en silencio**.
+> Reflashear el firmware también lo sobrescribe, porque `badge-full.bin` incluye
+> la partición de datos.
 
 ---
 
