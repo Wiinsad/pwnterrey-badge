@@ -18,6 +18,42 @@ portMUX_TYPE EvilPortal::_webOutLock = portMUX_INITIALIZER_UNLOCKED;  // CRIT-5 
 
 WebServer server(80);
 
+// Evil twin outcomes are recorded to SPIFFS, not only to the serial mirror.
+// The mirror is a 4 KB RAM ring that /api/poll drains destructively and that a
+// reboot clears, and the management AP is down for the entire attack - so the
+// single message explaining why an attack failed was unreachable by the only
+// person who needed it, every time. A file survives the AP disappearing, a
+// reboot, and the panel not being connected, and mgmtStateJson() hands it to
+// the panel on the next /api/state poll.
+static String _evilNoteCache;
+static bool _evilNoteLoaded = false;
+
+static void evilNote(const String &msg) {
+  Serial.println("[MGMT] " + msg);
+  _evilNoteCache  = msg;
+  _evilNoteLoaded = true;
+  File f = SPIFFS.open("/evil_last.txt", "w");
+  if (!f) return;
+  f.print(msg);
+  f.close();
+}
+
+// Cached deliberately: mgmtStateJson() runs on every /api/state poll, roughly
+// every two seconds, and opening SPIFFS that often costs latency on the same
+// loop() that services the web server for no benefit. The file is read at most
+// once per boot, to recover the note written before a reset.
+static String evilNoteRead() {
+  if (_evilNoteLoaded) return _evilNoteCache;
+  _evilNoteLoaded = true;
+  if (!SPIFFS.exists("/evil_last.txt")) return _evilNoteCache;
+  File f = SPIFFS.open("/evil_last.txt", "r");
+  if (!f) return _evilNoteCache;
+  _evilNoteCache = f.readString();
+  f.close();
+  _evilNoteCache.trim();
+  return _evilNoteCache;
+}
+
 // Serve a SPIFFS file in bounded chunks with an explicit Content-Length and
 // Connection: close. Each chunk is written with a bounded retry so a slow
 // client (phone power save) cannot wedge loop() forever, and the outcome is
@@ -2317,6 +2353,12 @@ void EvilPortal::setupManagementServer() {
     //      the portal. The management path starts it explicitly for this reason.
     WiFi.mode(WIFI_AP_STA);
     delay(200);
+    // Record the preconditions BEFORE the attempt. When softAP() returns false
+    // the Arduino core has already discarded the real esp_err_t and its log_e()
+    // is compiled out by DebugLevel=none, so these values are the only evidence
+    // of what it was actually asked to do.
+    uint32_t heap_before = ESP.getFreeHeap();
+    int mode_before = (int)WiFi.getMode();
     bool ap_ok = WiFi.softAP(apName, "", ch);
     if (ap_ok) WiFi.setTxPower(WIFI_POWER_20dBm);
 
@@ -2327,11 +2369,12 @@ void EvilPortal::setupManagementServer() {
       // evil network and no panel either. Hand the badge back to the REARM
       // branch of mgmtServiceJob() rather than restoring inline; that path is
       // already tested and its setupManagementServer() also puts both portal
-      // files back. The reason reaches the operator through SerialMirror, which
-      // the panel log reads once it is reachable again.
-      Serial.println("[MGMT] Evil Twin FAILED: could not create AP \"" +
-                     String(apName) + "\" on channel " + String(ch) +
-                     " - restoring management AP");
+      // files back.
+      evilNote("Evil Twin FAILED: softAP(\"" + String(apName) + "\" len=" +
+               String(strlen(apName)) + ") ch=" + String(ch) +
+               " refused. mode_before=" + String(mode_before) +
+               " mode_after=" + String((int)WiFi.getMode()) +
+               " heap=" + String(heap_before) + " -> restoring management AP");
       this->has_ap    = false;
       this->has_html  = false;
       this->runServer = false;
@@ -2365,15 +2408,16 @@ void EvilPortal::setupManagementServer() {
     // diagnose. authmode is the raw esp_wifi value: 0=OPEN, 1=WEP, 3=WPA2_PSK.
     wifi_config_t et_actual;
     if (esp_wifi_get_config(WIFI_IF_AP, &et_actual) == ESP_OK) {
-      Serial.printf("[MGMT] Evil Twin beacon: ssid=\"%s\" ch=%d authmode=%d hidden=%d\n",
-                    (const char *)et_actual.ap.ssid, (int)et_actual.ap.channel,
-                    (int)et_actual.ap.authmode, (int)et_actual.ap.ssid_hidden);
-      if ((int)et_actual.ap.channel != ch) {
-        Serial.printf("[MGMT] WARNING: asked for ch%d, radio is on ch%d\n",
-                      ch, (int)et_actual.ap.channel);
-      }
+      evilNote("Evil Twin UP: beacon ssid=\"" + String((const char *)et_actual.ap.ssid) +
+               "\" ch=" + String((int)et_actual.ap.channel) +
+               " authmode=" + String((int)et_actual.ap.authmode) +
+               " hidden=" + String((int)et_actual.ap.ssid_hidden) +
+               " ip=" + WiFi.softAPIP().toString() +
+               (((int)et_actual.ap.channel != ch)
+                  ? (" WARNING: asked ch" + String(ch))
+                  : String("")));
     } else {
-      Serial.println("[MGMT] WARNING: could not read back AP config");
+      evilNote("Evil Twin UP but AP config could not be read back");
     }
 
     Serial.println("[MGMT] Evil Twin AP: " + String(apName) + " IP: " + WiFi.softAPIP().toString());
@@ -2822,6 +2866,11 @@ String EvilPortal::mgmtStateJson() {
   json += ",\"ble_ready\":" + String(ble_ready ? "true" : "false");      // H
   json += ",\"ap_stations\":" + String(WiFi.softAPgetStationNum());       // BUG-04 fix: client count
   json += ",\"mgmt_state\":\"" + this->mgmtJobStateName() + "\"";
+  // Outcome of the last evil twin attempt, read from SPIFFS. The panel shows
+  // this verbatim so a failed attack explains itself without a serial cable,
+  // which is the only way the operator can ever see it: the management AP is
+  // down for the whole attack and the RAM log is gone by the time it returns.
+  json += ",\"evil_last\":\"" + mgmtJsonEscape(evilNoteRead()) + "\"";
   // H: job object per contract
   json += ",\"job\":{\"kind\":\"" + mgmtJsonEscape(job_kind) + "\"";
   json += ",\"type\":\"" + mgmtJsonEscape(job_type) + "\"";

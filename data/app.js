@@ -94,6 +94,13 @@ i+='<div class="kv"><span class="kl">IP</span><span class="kvv">'+esc(d.ip||'-')
 i+='<div class="kv"><span class="kl">Tiempo activo</span><span class="kvv">'+fmt(d.uptime_s)+'</span></div>';
 document.getElementById('hi').innerHTML=i;
 var kb=d.heap?Math.round(d.heap/1024):0,pct=d.heap?Math.min(100,Math.round(d.heap/327680*100)):0;
+// Surface the last evil twin outcome. The badge records it to SPIFFS because
+// the management AP is down for the whole attack, so this is the only way the
+// reason for a failure ever reaches the operator without a serial cable.
+var etl=document.getElementById('etlast');
+if(etl){if(d.evil_last){etl.style.display='';etl.textContent=d.evil_last;
+etl.style.color=/FAILED|WARNING|could not/.test(d.evil_last)?'var(--crit)':'var(--fg2)'}
+else etl.style.display='none'}
 document.getElementById('hram').textContent=d.heap?kb+' KB':'-';
 document.getElementById('hramb').style.width=pct+'%';
 if(d.heap_min){var hme=document.getElementById('hrammin');if(hme)hme.textContent=Math.round(d.heap_min/1024)+' KB';}
