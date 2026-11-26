@@ -2523,6 +2523,27 @@ void EvilPortal::setupManagementServer() {
     //      the portal. The management path starts it explicitly for this reason.
     WiFi.mode(WIFI_AP_STA);
     delay(200);
+    // Configure the IP and the DHCP DNS offer BEFORE bringing the AP up. This
+    // is the order the original startAP() used, and startAP() is the path that
+    // demonstrably produced a working captive portal on this firmware:
+    //
+    //   WiFi.mode(WIFI_AP);
+    //   WiFi.softAPConfig(AP_IP, AP_IP, IPAddress(255,255,255,0));
+    //   WiFi.softAP(apName);
+    //
+    // Calling it after softAP() was tried and the portal still did not open.
+    // NetworkInterface::config() writes the interface address with
+    // esp_netif_set_ip_info(), which is rejected on an interface that is
+    // already up, and a failure there returns early - before the OFFER_DNS
+    // option is ever reached. So the call appeared to be present while the one
+    // thing it was added for never happened.
+    //
+    // The 5th argument is the DNS server handed out in the lease and is the
+    // entire point: config() gates the OFFER_DNS option on it being non-zero.
+    // The 4th is the lease start, where zero means "AP IP + 1".
+    const IPAddress ET_IP(192, 168, 4, 1);
+    bool cfg_pre = WiFi.softAPConfig(ET_IP, ET_IP, IPAddress(255, 255, 255, 0),
+                                     IPAddress((uint32_t)0), ET_IP);
     // Record the preconditions BEFORE the attempt. When softAP() returns false
     // the Arduino core has already discarded the real esp_err_t and its log_e()
     // is compiled out by DebugLevel=none, so these values are the only evidence
@@ -2606,12 +2627,16 @@ void EvilPortal::setupManagementServer() {
 
       evilNote("Evil Twin DHCP: dhcps=" +
                String(et_st == ESP_NETIF_DHCP_STARTED ? "on" : "OFF") +
+               " cfg_pre=" + String(cfg_pre ? "ok" : "ERR") +
                " cfg=" + String(cfg_ok ? "ok" : "ERR") +
                " offer=" + String((int)offer_rb) +
                (offer_rb == 2 ? "(DNS ok)" : "(NOT offering DNS!)") +
                " dns=" + IPAddress(dns_rb.ip.u_addr.ip4.addr).toString() +
                " rfc8910=" + String(cp_ok ? "ok" : "no") +
                " ip=" + apip.toString());
+      // Also to serial, so the readout survives a panel that is unreachable
+      // during the attack.
+      Serial.println("[MGMT] " + evilNoteRead());
     } else {
       evilNote("Evil Twin WARNING: AP netif handle not found, no DHCP/DNS offer");
     }
